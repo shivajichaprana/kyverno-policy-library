@@ -1,0 +1,107 @@
+---
+# Signature verification is the one rule in this set that reaches the network. That makes
+# it the one with the most ways to succeed and mean nothing, so each is handled here and
+# named rather than left to be discovered from a cluster.
+#
+#   Scope. `imageReferences` matches only images this organisation publishes and
+#   therefore signs. A pattern of `"*"` would demand a signature from every vendor image
+#   in the cluster — the CNI, the CSI driver, the pause container — and on the first
+#   restart of a node there would be nothing to schedule onto it. Verify what you sign.
+#
+#   The scope cannot be data-driven. Kyverno does not permit variables in
+#   `imageReferences`, so this list cannot be read from a ConfigMap the way an ordinary
+#   validate rule's allow-list can. It is a static list, and the companion registry
+#   policy keeps its allow-list static for the same reason.
+#
+#   Verification results are cached. Kyverno caches a successful verification for 60
+#   minutes by default. Revoking a key or deleting a signature in the registry does not
+#   take effect until that entry expires, so for up to an hour afterwards the revoked
+#   image is still admitted and nothing reports otherwise. Shorten
+#   `imageVerifyCacheTTLDuration` on the admission controller if that window matters.
+#
+#   Enforcement mode is the deprecated field, deliberately. Kyverno documents no per-rule
+#   `failureAction` for `verifyImages`; the replacement introduced in 1.13 covers
+#   `validate` rules only. So this policy carries the policy-level
+#   `validationFailureAction` while the rest of the library uses the per-rule field. When
+#   a per-rule equivalent exists for image verification, this is the file that changes.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-image-signatures
+  annotations:
+    policies.kyverno.io/title: Require Image Signatures
+    policies.kyverno.io/category: Images
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/minversion: 1.13.0
+    policies.kyverno.io/description: >-
+      Requires a valid Cosign signature on images published from the internal registry,
+      and rewrites the verified reference to its digest. Images outside that registry are
+      not matched by this rule and are not verified — that is the registry policy's job,
+      not this one's.
+spec:
+  # Deprecated as of 1.13 and kept on purpose — see the header. `Audit` records the
+  # result in a PolicyReport and admits the request.
+  validationFailureAction: Audit
+
+  # Background scanning re-evaluates existing Pods on a timer. Image verification is
+  # excluded from that here: a background scan runs without the admission request, so it
+  # has no pull secrets from the Pod being evaluated and reaches private registries
+  # unauthenticated. The findings that produces describe the scanner, not the image.
+  background: false
+
+  webhookConfiguration:
+    # `Fail` means a Kyverno outage blocks admission rather than silently letting
+    # unverified images through. The alternative, `Ignore`, also causes a failing call to
+    # the registry to be ignored, which turns a registry outage into images being
+    # admitted unverified — fail-open on the control this policy exists to provide.
+    # `Fail` is the safer default and the more disruptive one; the trade is real either
+    # way and this is the knob.
+    failurePolicy: Fail
+    # Verification is several registry round-trips. 30s is the documented maximum.
+    timeoutSeconds: 30
+
+  rules:
+    - name: verify-internal-images
+      match:
+        any:
+          # Pod and nothing else, so auto-generation extends this to Pod controllers.
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      verifyImages:
+        - imageReferences:
+            - "registry.example.com/*"
+          # Every matching image must be verified. With this false, an image that no
+          # attestor could vouch for is admitted, and the rule reports success.
+          required: true
+          # Replace the verified tag with the digest it resolved to. This is what closes
+          # the gap between the moment the signature was checked and the moment the
+          # kubelet pulls, during which a tag can be repointed at unsigned content.
+          #
+          # It also means the running Pod's image field is not the string that was
+          # applied. A GitOps controller comparing `app:1.4.0` in git against
+          # `app@sha256:...` in the cluster will report drift it can never reconcile, so
+          # configure it to ignore the image field on these workloads.
+          mutateDigest: true
+          # Refuse an image that still has no digest after the mutation above.
+          verifyDigest: true
+          attestors:
+            # `count` is how many entries must verify. Omitting it requires all of them,
+            # which is the right setting for a key rotation where both the old and the new
+            # key must sign, and the wrong one for a list of alternative signers.
+            - count: 1
+              entries:
+                - keys:
+                    publicKeys: |-
+                      -----BEGIN PUBLIC KEY-----
+                      REPLACE_WITH_YOUR_COSIGN_PUBLIC_KEY
+                      -----END PUBLIC KEY-----

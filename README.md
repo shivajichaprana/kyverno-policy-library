@@ -12,7 +12,7 @@ operator decides it should.
 
 | Set | Question it answers | Status |
 |---|---|---|
-| `policies/images/` | Which images may run, from where, and who signed them | planned |
+| `policies/images/` | Which images may run, from where, and who signed them | shipped |
 | `policies/pod-security/` | How a Pod must be configured to be allowed to run | planned |
 | `policies/resources/` | What a workload may consume and how it must be spread | planned |
 | `policies/network/` | What network identity a workload must declare | planned |
@@ -77,7 +77,7 @@ library is only useful on the version a cluster is actually running. Kyverno pub
 Apply a set and watch what it would have blocked, without blocking anything:
 
 ```sh
-kubectl apply -f policies/<set>/
+kubectl apply -f policies/images/
 kubectl get clusterpolicy
 kubectl get policyreport -A
 ```
@@ -85,8 +85,12 @@ kubectl get policyreport -A
 Check a manifest before it reaches a cluster:
 
 ```sh
-kyverno apply policies/<set>/ --resource my-workload.yaml
+kyverno apply policies/images/ --resource my-workload.yaml
 ```
+
+Every value in the shipped policies is a placeholder — the registry hostnames, the
+organisation name and the signing key. Replace them before reading the reports, or the
+reports will simply list everything. `policies/images/README.md` has the table.
 
 Turn a rule on by changing that rule's `validate.failureAction` from `Audit` to
 `Enforce`. Read the policy report first — the report is the rehearsal.
@@ -97,6 +101,8 @@ Turn a rule on by changing that rule's `validate.failureAction` from `Audit` to
 |---|---|
 | `policies/` | The policy sets, one directory per concern |
 | `policies/README.md` | How a policy in this library is structured and why |
+| `policies/images/` | Image provenance: signatures, registries, tags |
+| `policies/images/README.md` | What each image policy catches, and what it does not |
 | `.yamllint` | Lint configuration shared by the local checks |
 | `LICENSE` | MIT |
 

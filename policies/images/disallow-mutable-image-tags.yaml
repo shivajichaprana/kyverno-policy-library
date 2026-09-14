@@ -1,0 +1,102 @@
+---
+# An image reference that does not pin a specific build is a workload whose contents
+# can change without anything in the cluster changing. Two separate rules are needed,
+# because forbidding the bad value and requiring a good one are different checks:
+#
+#   1. require-image-tag    — an image with NO tag resolves to `latest` at pull time.
+#      `image: nginx` is `docker.io/library/nginx:latest`. A rule that only forbids the
+#      literal string `latest` admits it, and reports clean while doing so.
+#
+#   2. disallow-latest-tag  — the explicit `:latest` tag.
+#
+# A digest reference (`repo/app@sha256:...`) satisfies both: it contains a `:` so the
+# tag-presence pattern matches, and it carries no tag so the `latest` check cannot fail.
+# That is the intended outcome — a digest is the strongest form of pinning available.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-mutable-image-tags
+  annotations:
+    policies.kyverno.io/title: Disallow Mutable Image Tags
+    policies.kyverno.io/category: Images
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/minversion: 1.13.0
+    policies.kyverno.io/description: >-
+      Requires every container image to carry an explicit tag or digest, and rejects the
+      `latest` tag. Covers containers, initContainers and ephemeralContainers. Does not
+      attempt to judge whether a tag other than `latest` is itself mutable — a team that
+      re-pushes `v1.2.3` defeats this check, and only a digest closes that gap.
+spec:
+  # Background scanning reports on Pods that already exist, which is how a cluster
+  # adopting this library finds out what it is already running before anything blocks.
+  background: true
+  rules:
+    - name: require-image-tag
+      match:
+        any:
+          # Pod and nothing else. Naming a controller kind here would switch OFF
+          # Kyverno's auto-generation for Pod controllers and narrow the coverage of
+          # this rule to exactly the kinds listed.
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          # Namespaces, never kinds — a kind here would disable auto-generation.
+          # This is a real gap and not a safe one: anyone able to create a Pod in these
+          # namespaces is outside every rule in this library. Who holds that access is
+          # the control that matters there.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      validate:
+        failureAction: Audit
+        message: >-
+          Every container image must include an explicit tag or digest. An image with no
+          tag is pulled as `:latest`, so what runs is decided at pull time rather than at
+          deploy time.
+        pattern:
+          spec:
+            # `=()` applies the check only when the key is present, so a Pod with no
+            # initContainers is not a failure. Both optional lists are covered because a
+            # rule that reads only `containers` has a documented bypass:
+            # `kubectl debug` injects an ephemeral container into a RUNNING Pod, with
+            # that Pod's service account, and it never passes through `containers`.
+            =(ephemeralContainers):
+              - image: "*:*"
+            =(initContainers):
+              - image: "*:*"
+            containers:
+              - image: "*:*"
+
+    - name: disallow-latest-tag
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      validate:
+        failureAction: Audit
+        message: >-
+          The `latest` tag is not permitted. Pin the image to a released version, or to a
+          digest if the tag itself is rewritten by your build.
+        pattern:
+          spec:
+            =(ephemeralContainers):
+              - image: "!*:latest"
+            =(initContainers):
+              - image: "!*:latest"
+            containers:
+              - image: "!*:latest"

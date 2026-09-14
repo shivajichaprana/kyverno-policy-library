@@ -1,0 +1,117 @@
+---
+# Two rules that cover each other's blind spot. Shipping either one alone leaves a hole
+# that reports clean.
+#
+#   1. validate-registries       — WHICH registry, checked against the registry Kyverno
+#      resolves rather than the string the author typed. `image: nginx` contains no
+#      registry at all; Kyverno normalises an empty registry to `docker.io` (and prefixes
+#      official Docker Hub repositories with `library/`). A rule written against the raw
+#      `image` field to reject `docker.io/*` therefore passes `nginx`, `redis` and
+#      `postgres` — the exact references it exists to stop — and produces no findings
+#      while doing so.
+#
+#   2. restrict-repository-paths — WHOSE namespace inside that registry. A hostname is
+#      not an authorisation boundary on a shared public registry: allow-listing `ghcr.io`
+#      allows every account's packages on `ghcr.io`. This rule reads the raw reference and
+#      so, by design, cannot see the implicit `docker.io/library` prefix — which is
+#      precisely why rule 1 is not optional.
+#
+# The allow-list is held in the policy rather than read from a ConfigMap. A `context`
+# entry reading a ConfigMap would work here, but the companion signing policy cannot use
+# one — Kyverno does not permit variables in `verifyImages.imageReferences` — so keeping
+# both static keeps the approved-registry list in one form in one place. A team that
+# prefers a ConfigMap can add one to this rule and accept that the two lists then live in
+# different places.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-image-registries
+  annotations:
+    policies.kyverno.io/title: Restrict Image Registries
+    policies.kyverno.io/category: Images
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/minversion: 1.13.0
+    policies.kyverno.io/description: >-
+      Restricts container images to approved registries and, within those registries, to
+      approved repository paths. Covers containers, initContainers and
+      ephemeralContainers. Replace the placeholder hostnames and organisation before use;
+      shipped as-is this policy will report every image in the cluster.
+spec:
+  background: true
+  rules:
+    - name: validate-registries
+      match:
+        any:
+          # Pod and nothing else, so auto-generation covers every controller that creates
+          # Pods. Adding `Deployment` here would turn that off and leave this rule
+          # covering fewer resources than it does now.
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      context:
+        # The three container lists are merged into one map before their registries are
+        # read. Container names are unique across all three lists in a Pod spec, so the
+        # merge cannot lose an entry. `default` covers the case where the request carries
+        # no image at all, which would otherwise make the expression null rather than
+        # empty — and a null compared against a set is not a comparison that fails
+        # safely.
+        - name: imageRegistries
+          variable:
+            jmesPath: >-
+              merge(images.containers || `{}`, images.initContainers || `{}`,
+              images.ephemeralContainers || `{}`) | values(@)[].registry
+            default: []
+      validate:
+        failureAction: Audit
+        message: >-
+          Images may only be pulled from an approved registry. Note that an image with no
+          registry prefix is pulled from Docker Hub, so `nginx` is rejected for the same
+          reason `docker.io/library/nginx` is.
+        deny:
+          conditions:
+            all:
+              - key: "{{ imageRegistries }}"
+                operator: AnyNotIn
+                value:
+                  - registry.example.com
+                  - ghcr.io
+
+    - name: restrict-repository-paths
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      validate:
+        failureAction: Audit
+        message: >-
+          Images from a shared registry must come from an approved repository path. The
+          registry hostname alone does not identify who published the image.
+        pattern:
+          spec:
+            # `=()` means "check this only if the key is present", so a Pod without
+            # initContainers is not a failure. `|` separates alternatives: the value
+            # matches if it matches any of them.
+            =(ephemeralContainers):
+              - image: "registry.example.com/* | ghcr.io/<your-org>/*"
+            =(initContainers):
+              - image: "registry.example.com/* | ghcr.io/<your-org>/*"
+            containers:
+              - image: "registry.example.com/* | ghcr.io/<your-org>/*"
