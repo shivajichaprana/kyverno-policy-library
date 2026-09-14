@@ -1,0 +1,14 @@
+---
+# Kyverno policies carry long JMESPath expressions and templated strings, so the
+# line-length and truthy rules are relaxed rather than fought. Everything that
+# affects whether a policy parses is still checked.
+extends: relaxed
+
+rules:
+  line-length: disable
+  document-start: disable
+  truthy: disable
+  comments-indentation: disable
+  indentation:
+    spaces: 2
+    indent-sequences: consistent

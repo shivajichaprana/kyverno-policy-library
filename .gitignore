@@ -1,0 +1,20 @@
+# Kyverno CLI output
+kyverno-test-results/
+*-policy-report.yaml
+*-policy-report.json
+
+# Rendered or downloaded manifests
+dist/
+tmp/
+*.tgz
+
+# Python tooling used by the local checks
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editor and OS noise
+.idea/
+.vscode/
+.DS_Store
