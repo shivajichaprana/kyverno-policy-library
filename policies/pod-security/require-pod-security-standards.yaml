@@ -1,0 +1,153 @@
+---
+# The Pod Security Standards, applied cluster-wide as two rules.
+#
+# WHY THIS IS A `podSecurity` SUBRULE AND NOT A SET OF HAND-WRITTEN PATTERNS
+#
+# Three of the four controls this set is expected to cover — runAsNonRoot, seccomp and
+# capabilities — read fields that may be set at the POD level, at the CONTAINER level, or
+# at both, and the container value wins where both exist. A `pattern` rule cannot express
+# that, and both ways of writing it are wrong in a way that reports cleanly:
+#
+#   * A pattern over `spec.containers[].securityContext.runAsNonRoot` fails a Pod that
+#     set the field once at `spec.securityContext` and inherits it correctly. That is a
+#     false violation, and a report full of false violations is a report nobody reads.
+#
+#   * A pattern over `spec.securityContext.runAsNonRoot` admits a Pod that sets it at the
+#     top and then overrides it to `false` on one container. That is the exact shape an
+#     exemption-by-stealth takes, and it produces no finding at all.
+#
+# The `podSecurity` subrule links the same library Kubernetes' own Pod Security Admission
+# uses, so the pod-or-container resolution is the real one rather than an approximation.
+# Kyverno's failure text says so directly: `pod or container "x" must set
+# securityContext.runAsNonRoot=true`. That is the whole reason this file is four settings
+# long instead of four rules long.
+#
+# WHAT THIS BUYS OVER TURNING ON POD SECURITY ADMISSION ITSELF
+#
+# Pod Security Admission is driven by a label on each namespace. A namespace created
+# without that label is governed by nothing, silently, and a new namespace is the most
+# likely thing in a cluster to be missing a label. This rule matches every Pod in the
+# cluster except the namespaces named below, so coverage is the default and the gap is
+# the thing written down.
+#
+# TWO RULES, NOT ONE
+#
+# `restricted` already includes every `baseline` control, so a single restricted rule
+# would be sufficient to catch everything. They are split because the two profiles answer
+# different questions and are adopted at different speeds:
+#
+#   baseline   — is this Pod dangerous? (host namespaces, privileged, hostPath, ...)
+#   restricted — is this Pod hardened? (non-root, seccomp, dropped capabilities, ...)
+#
+# Splitting them means the usual adoption path — turn baseline on first, leave restricted
+# reporting until the workloads catch up — is one field edit rather than a rewrite, and
+# the two policy reports stay legible separately.
+#
+# The cost is deliberate and worth stating: because restricted is inclusive of baseline,
+# a Pod that violates a baseline control is reported TWICE, once by each rule. That is
+# duplication, not a bug, and it disappears the moment baseline is clean.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-pod-security-standards
+  annotations:
+    policies.kyverno.io/title: Require Pod Security Standards
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/minversion: 1.13.0
+    policies.kyverno.io/description: >-
+      Applies the Kubernetes Pod Security Standards baseline and restricted profiles to
+      every Pod in the cluster as two independently adjustable rules. Covers runAsNonRoot,
+      seccomp, capabilities, privilege escalation, host namespaces, hostPath volumes and
+      the rest of both profiles, with pod-level and container-level settings resolved the
+      way Pod Security Admission resolves them. Does NOT cover readOnlyRootFilesystem,
+      which is not part of either profile — see require-read-only-root-filesystem.yaml.
+spec:
+  # Background scanning reports on Pods that already exist, which is how a cluster
+  # adopting this library finds out what it is already running before anything blocks.
+  background: true
+  rules:
+    - name: validate-baseline-profile
+      match:
+        any:
+          # Pod and nothing else. Naming a controller kind here would switch OFF
+          # Kyverno's auto-generation for Pod controllers and narrow the coverage of
+          # this rule to exactly the kinds listed.
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          # Namespaces, never kinds — a kind here would disable auto-generation.
+          # These are excluded because the control plane and Kyverno itself legitimately
+          # run Pods that violate both profiles, and a rule that reports them every
+          # reconcile is a rule that gets muted. It is still a real gap: anyone able to
+          # create a Pod in these namespaces is outside every rule in this library, so
+          # who holds that access is the control that matters there.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      validate:
+        failureAction: Audit
+        podSecurity:
+          level: baseline
+          # `latest` tracks whatever version of the standards the running Kyverno was
+          # built against, which means the meaning of this rule can change on a Kyverno
+          # UPGRADE rather than on a commit to this repository — a workload that was
+          # compliant can begin failing with nothing in the git history to explain it.
+          # That is accepted here, and is the right trade for a rule shipping in Audit:
+          # a new control appears as a finding to read rather than as a rejection. Pin it
+          # (`version: v1.31`) before moving this rule to Enforce, so that turning on
+          # enforcement and changing what is enforced stay separate events.
+          version: latest
+
+    - name: validate-restricted-profile
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      validate:
+        failureAction: Audit
+        podSecurity:
+          level: restricted
+          version: latest
+          # NO CONTROLS ARE EXCLUDED HERE, and that is the shipped position: an exclusion
+          # is a hole, and a hole that arrives with the library is one nobody chose. The
+          # mechanism is documented rather than used, because when it IS needed it has a
+          # trap in it.
+          #
+          # A control whose restricted fields live at the Pod `spec` level is excluded by
+          # `controlName` alone. A control whose fields live at the `containers[]` level
+          # needs `controlName` AND an `images[]` list. A control with fields at BOTH
+          # levels needs TWO entries, and supplying only one excludes only half of it —
+          # which looks exactly like a working exclusion until the half still in force
+          # rejects something.
+          #
+          # Seccomp is the common example, because its field is settable in both places:
+          #
+          #   exclude:
+          #     - controlName: Seccomp          # the spec-level half
+          #     - controlName: Seccomp          # the containers[] half
+          #       images:
+          #         - '*'
+          #
+          # A service mesh is the usual honest reason to need one, and it should be
+          # scoped to the sidecar rather than to everything:
+          #
+          #   exclude:
+          #     - controlName: Capabilities
+          #       images:
+          #         - '*/proxy-init:*'

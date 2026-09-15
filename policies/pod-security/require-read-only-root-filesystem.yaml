@@ -1,0 +1,104 @@
+---
+# An immutable container root filesystem: the one hardening control in this set that the
+# Pod Security Standards do not contain.
+#
+# WHY THIS IS A SEPARATE POLICY RATHER THAN PART OF THE PROFILE
+#
+# `readOnlyRootFilesystem` is not a control in the baseline profile, and it is not a
+# control in the restricted profile either. A cluster that turns on the restricted
+# profile — by namespace label, by admission configuration, or by the podSecurity rule in
+# this same directory — has not covered it and gets no finding saying so.
+#
+# Kyverno's own published sample for this control is filed under `best-practices` and
+# tagged `PSP Migration`, not under `pod-security`. That tag is the whole story:
+# `readOnlyRootFilesystem` was a PodSecurityPolicy field, PodSecurityPolicy was removed,
+# and this is one of the fields that was NOT carried into its replacement. Anyone who
+# migrated from PSP to the Pod Security Standards and assumed the standards were a
+# superset lost this control in the move, silently, because nothing reports the absence
+# of a rule.
+#
+# WHY A `pattern` IS CORRECT HERE WHEN IT WAS NOT FOR runAsNonRoot
+#
+# The sibling policy uses a `podSecurity` subrule because its fields exist at both the
+# Pod and container levels and the resolution between them is not something a pattern can
+# express. This field has no Pod-level form at all — `spec.securityContext` has no
+# `readOnlyRootFilesystem` — so there is nothing to inherit, nothing to override, and a
+# per-container pattern says exactly what it means. The choice between the two rule types
+# is about where the field lives, not about preference.
+#
+# WHAT THIS DOES NOT DO
+#
+# It makes the image layer immutable. It does not make the Pod's storage immutable: an
+# emptyDir, a PVC or a ConfigMap mounted read-write is still writable, and that is the
+# intended way to run a workload that needs scratch space. `readOnlyRootFilesystem: true`
+# plus an `emptyDir` at `/tmp` is a passing, working Pod — and a better one, because what
+# it may write is now declared instead of assumed.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-read-only-root-filesystem
+  annotations:
+    policies.kyverno.io/title: Require Read-Only Root Filesystem
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/minversion: 1.13.0
+    policies.kyverno.io/description: >-
+      Requires every container to set securityContext.readOnlyRootFilesystem to true, so
+      that a compromised process cannot write to the image layer. Covers containers,
+      initContainers and ephemeralContainers. This control is deliberately separate from
+      the Pod Security Standards because neither the baseline nor the restricted profile
+      contains it. Does not restrict writes to mounted volumes, which remain the declared
+      way to give a workload scratch space.
+spec:
+  background: true
+  rules:
+    - name: validate-read-only-root-filesystem
+      match:
+        any:
+          # Pod and nothing else — see the note in the sibling policy and in
+          # policies/README.md. A controller kind here narrows coverage instead of
+          # widening it.
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          # Namespaces, never kinds.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      validate:
+        failureAction: Audit
+        message: >-
+          Every container must set securityContext.readOnlyRootFilesystem to true. If the
+          workload needs to write, mount an emptyDir or a volume at the path it writes to
+          rather than leaving the whole image layer writable.
+        pattern:
+          spec:
+            # `=()` applies the check only when the key is present, so a Pod with no
+            # initContainers is not a failure. All three lists are covered because a rule
+            # that reads only `containers` has a documented bypass — and this is the
+            # specific place the upstream sample for this control stops, which is why
+            # this file exists rather than a copy of it.
+            #
+            # Covering ephemeralContainers has a visible consequence worth stating: a
+            # `kubectl debug` session injects one, debug images generally expect to
+            # write, and so every debug session will produce a finding. That is not an
+            # oversight and it is not a reason to drop the list — an ephemeral container
+            # runs inside the target Pod with the target Pod's service account, so it is
+            # exactly the entry point a rule like this should be able to see. Grant it a
+            # PolicyException scoped to the debug image if the noise is not wanted; an
+            # exception is reviewable, and quietly omitting the list is not.
+            =(ephemeralContainers):
+              - securityContext:
+                  readOnlyRootFilesystem: true
+            =(initContainers):
+              - securityContext:
+                  readOnlyRootFilesystem: true
+            containers:
+              - securityContext:
+                  readOnlyRootFilesystem: true

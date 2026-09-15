@@ -13,7 +13,7 @@ operator decides it should.
 | Set | Question it answers | Status |
 |---|---|---|
 | `policies/images/` | Which images may run, from where, and who signed them | shipped |
-| `policies/pod-security/` | How a Pod must be configured to be allowed to run | planned |
+| `policies/pod-security/` | How a Pod must be configured to be allowed to run | shipped |
 | `policies/resources/` | What a workload may consume and how it must be spread | planned |
 | `policies/network/` | What network identity a workload must declare | planned |
 | `policies/supply-chain/` | What the build must prove about itself | planned |
@@ -35,6 +35,9 @@ Each policy here is written around a specific instance of that:
 | Forbidding the `latest` tag | An image with **no** tag resolves to `latest` at pull time, and a rule that only forbids the literal tag admits it. Requiring that a tag is present is a separate rule. |
 | Allow-listing a shared public registry by hostname | `ghcr.io` is not an authorisation boundary. Allow-listing the host allows every account's packages on it; the repository path is the part that identifies the owner. |
 | Validating `spec.containers` | It misses `initContainers` and `ephemeralContainers`. An ephemeral container is injected into a *running* Pod, runs with that Pod's service account, and slips past any rule that only reads the main list. |
+| Writing `runAsNonRoot` or `seccompProfile` as a pattern over `spec.containers[]` | Those fields may be set on the Pod, on the container, or on both, and the container wins. A container-level pattern **fails** a Pod that set the field once at the Pod level and inherits it correctly; a Pod-level pattern **misses** a container that overrides it to `false`. One direction floods the report with false findings, the other reports clean. |
+| Turning on the restricted profile and considering the Pod hardened | `readOnlyRootFilesystem` is in neither profile. It was a PodSecurityPolicy field that was not carried into the standards, so a migration from PSP loses it and nothing reports the absence of a rule. |
+| Excluding a Pod Security control with one `exclude[]` entry | A control with restricted fields at **both** the `spec` and `containers[]` levels needs **two** entries. One excludes half of it, the other half keeps rejecting, and the exclusion looks applied — so the investigation starts in the wrong place. |
 
 ## Conventions every policy follows
 
@@ -44,6 +47,9 @@ Each policy here is written around a specific instance of that:
   [Auto-Gen Rules](https://kyverno.io/docs/policy-types/cluster-policy/autogen/).
 - **All three container lists are checked** — `containers`, `initContainers` and
   `ephemeralContainers` — with the optional two guarded so an absent list is not a failure.
+  This applies to every rule that enumerates containers itself. A `podSecurity` subrule
+  names no list because it does not iterate one: it hands the Pod to the same library Pod
+  Security Admission uses, which already reads all three.
 - **Audit by default**, set per rule via `validate.failureAction`, so the enforcement mode
   of a rule is readable beside the rule rather than at the top of the file.
 - **Placeholders only.** Registry hostnames, organisation names and keys are
@@ -88,9 +94,13 @@ Check a manifest before it reaches a cluster:
 kyverno apply policies/images/ --resource my-workload.yaml
 ```
 
-Every value in the shipped policies is a placeholder — the registry hostnames, the
-organisation name and the signing key. Replace them before reading the reports, or the
-reports will simply list everything. `policies/images/README.md` has the table.
+Two policies need editing before their reports mean anything, because the registry
+hostnames, the organisation name and the signing key in them are placeholders:
+`policies/images/restrict-image-registries.yaml` and
+`policies/images/require-image-signatures.yaml`.
+`policies/images/README.md` has the substitution table. Nothing else carries a
+placeholder — the tag policy is registry-agnostic, and the Pod security policies mean
+what they say as shipped, because the Pod Security Standards are the same everywhere.
 
 Turn a rule on by changing that rule's `validate.failureAction` from `Audit` to
 `Enforce`. Read the policy report first — the report is the rehearsal.
@@ -103,6 +113,8 @@ Turn a rule on by changing that rule's `validate.failureAction` from `Audit` to
 | `policies/README.md` | How a policy in this library is structured and why |
 | `policies/images/` | Image provenance: signatures, registries, tags |
 | `policies/images/README.md` | What each image policy catches, and what it does not |
+| `policies/pod-security/` | Pod configuration: the Pod Security Standards, immutable root filesystem |
+| `policies/pod-security/README.md` | Why these are a `podSecurity` subrule, and how to adopt them |
 | `.yamllint` | Lint configuration shared by the local checks |
 | `LICENSE` | MIT |
 
