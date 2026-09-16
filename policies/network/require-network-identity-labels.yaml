@@ -1,0 +1,146 @@
+---
+# The labels a NetworkPolicy needs in order to find this Pod.
+#
+# A NetworkPolicy does not name workloads. It selects them, by label, and a Pod that
+# carries the wrong labels is simply not selected. Nothing about that is reported: the
+# NetworkPolicy exists, it is valid, `kubectl describe` shows its rules, and the Pod it
+# was written for is governed by none of them.
+#
+# Which direction that fails in depends on something the Pod cannot see:
+#
+#   In a namespace with a default-deny policy, an unlabelled Pod is caught by the
+#   default-deny and gets no connectivity it was not granted. The failure is loud — the
+#   workload cannot reach anything — and somebody fixes it within the hour.
+#
+#   In a namespace without one, an unlabelled Pod is selected by nothing, and a Pod
+#   selected by no NetworkPolicy is unrestricted. The failure is silent, it is the
+#   permissive direction, and the cluster looks exactly as it does when everything is
+#   correct.
+#
+# The second case is the reason this policy exists. It is also why the rules below check
+# labels on the Pod rather than checking that NetworkPolicies exist: a policy that is
+# present but selects nothing is the same outcome as no policy at all, and the label is
+# the half of that pair which lives on the workload.
+#
+# THE TYPO IS THE INTERESTING CASE
+#
+# `tier: frontned` is a valid label. The API accepts it, the Pod runs, and it is selected
+# by no NetworkPolicy that was written for `frontend`. A rule that only requires the
+# label to be PRESENT passes it, which makes presence-checking the weaker half of the job
+# — so the value is constrained to a declared set, and a value outside that set is a
+# finding rather than a new tier nobody has written policy for yet.
+#
+# The two rules are separated on purpose, and the separation is the thing to keep when
+# editing them: the first reports a missing label, the second reports a label whose value
+# means nothing. A single rule covering both would report one finding for two problems
+# with different fixes, and the precondition on the second is what stops a missing label
+# being counted twice.
+#
+# WHAT THIS DOES NOT DO
+#
+# It does not check that a NetworkPolicy selecting each tier actually exists, and it
+# cannot: an admission rule sees one object, and whether some other object selects it is a
+# question about the whole namespace. Labelling every Pod correctly in a namespace with no
+# NetworkPolicy at all produces a perfectly clean report and an entirely open network. The
+# labels are a precondition for network policy, not a substitute for it, and the check
+# that the other half is present belongs in a namespace-level report.
+#
+# It also says nothing about whether the tier claimed is the RIGHT one. A database that
+# labels itself `frontend` is consistent, selectable, and wrong.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-network-identity-labels
+  annotations:
+    policies.kyverno.io/title: Require Network Identity Labels
+    policies.kyverno.io/category: Network
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/minversion: 1.13.0
+    policies.kyverno.io/description: >-
+      Requires every Pod to carry the labels a NetworkPolicy selects on, and requires the
+      network tier label to hold one of a declared set of values. A Pod that is selected
+      by no NetworkPolicy is unrestricted in a namespace with no default-deny, and a
+      mistyped tier value is selected by nothing while remaining a perfectly valid label.
+      Does not check that a NetworkPolicy selecting each tier exists, which is a property
+      of the namespace rather than of the Pod, and cannot tell whether the tier a workload
+      claims is the correct one for it.
+spec:
+  background: true
+  rules:
+    - name: require-identity-labels
+      match:
+        any:
+          # Pod and nothing else. Naming a controller kind here would switch OFF
+          # Kyverno's auto-generation for Pod controllers and narrow this rule's
+          # coverage to exactly the kinds listed.
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          # Namespaces, never kinds.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      validate:
+        failureAction: Audit
+        message: >-
+          Every Pod must carry app.kubernetes.io/name and a network tier label. A Pod
+          without them is selected by no NetworkPolicy, which in a namespace with no
+          default-deny policy means it is unrestricted.
+        pattern:
+          metadata:
+            labels:
+              # `?*` requires the key to be present with a non-empty value. Presence
+              # alone would not be enough: an empty string is a valid label value and is
+              # selected by a NetworkPolicy matching the empty string, which nobody
+              # writes.
+              app.kubernetes.io/name: "?*"
+              network.example.com/tier: "?*"
+
+    - name: require-known-network-tier
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      preconditions:
+        all:
+          # Only judge the value when the label is there; a missing label is the rule
+          # above, and reporting it twice would put one problem in two findings.
+          #
+          # The sentinel is `<absent>` because Kubernetes label values may hold only
+          # alphanumerics, `-`, `_` and `.`. Angle brackets are rejected by the API, so
+          # no real label can ever equal it and the guard cannot be defeated by a
+          # workload that simply sets the value to whatever the sentinel happens to be.
+          - key: '{{ not_null(request.object.metadata.labels."network.example.com/tier", `"<absent>"`) }}'
+            operator: NotEquals
+            value: <absent>
+      validate:
+        failureAction: Audit
+        message: >-
+          The network tier label must be one of frontend, backend, data or
+          egress-restricted. A value outside that set is still a valid label, so the Pod
+          runs and is selected by no NetworkPolicy written for any known tier.
+        deny:
+          conditions:
+            all:
+              - key: '{{ not_null(request.object.metadata.labels."network.example.com/tier", `"<absent>"`) }}'
+                operator: NotIn
+                value:
+                  - frontend
+                  - backend
+                  - data
+                  - egress-restricted

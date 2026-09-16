@@ -1,0 +1,149 @@
+---
+# A PodDisruptionBudget is the only object in a cluster whose failure mode is to work too
+# well. It exists to refuse evictions, so a budget that refuses ALL of them is not
+# obviously broken: it is created without complaint, it appears in `kubectl get pdb`, its
+# controller is healthy, and the first symptom is a node drain that never finishes during
+# an upgrade somebody scheduled for a maintenance window.
+#
+# THE TWO WAYS A BUDGET STOPS EVERYTHING
+#
+#   maxUnavailable: 0   — no pod may be unavailable, so no pod may be evicted.
+#   minAvailable: 100%  — the same statement written the other way round.
+#
+# Either pins the budget's allowed disruptions at zero permanently. `kubectl drain` waits
+# for a disruption that the cluster has been instructed never to permit, and waits for as
+# long as it is allowed to. Neither value is rejected by the API, because both are
+# legitimate things to say — briefly, deliberately, while something is being migrated.
+# Left in a manifest they are a cluster that cannot be upgraded.
+#
+# A third case is real and is NOT covered here: `minAvailable` set to a number that equals
+# the workload's replica count has exactly the same effect, and cannot be detected from
+# the budget alone because the replica count is not in it. Finding those needs the
+# workload alongside the budget, which is a report rather than an admission rule. The
+# value to read for the real answer is `status.disruptionsAllowed`, which is the cluster's
+# own arithmetic and covers every case including this one.
+#
+# THE SELECTOR THAT MEANS THE OPPOSITE OF WHAT IT USED TO
+#
+# `spec.selector: {}` is the quietest of these. An empty selector on a `policy/v1`
+# PodDisruptionBudget selects EVERY POD IN THE NAMESPACE. On the `policy/v1beta1` API it
+# selected none. That API version stopped being served in Kubernetes 1.25, so the same
+# manifest, unchanged and still valid, reversed its meaning across an upgrade — from a
+# budget that protected nothing to one that governs everything beside it.
+#
+# An UNSET selector selects no pods on either version, which is the opposite failure and
+# just as silent: the budget is present, it is counted, and it protects nothing.
+#
+# One rule catches both, because in both cases the budget does not say what it covers, and
+# whether the consequence is nothing-protected or everything-blocked depends on a server
+# version rather than on the document. A budget should name its workload.
+#
+# WHY THESE RULES DO NOT MATCH Pod
+#
+# Every Pod-level rule in this library matches `Pod` and nothing else, because naming any
+# additional kind turns off Kyverno's auto-generation for Pod controllers. These rules
+# match `PodDisruptionBudget`, which is not a workload and carries no pod template, so
+# there is nothing for auto-generation to translate and nothing is lost. The invariant
+# that matters is the one being kept here: no rule ever names `Pod` ALONGSIDE another
+# kind. That is the combination that silently narrows coverage.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-safe-disruption-budgets
+  annotations:
+    policies.kyverno.io/title: Require Safe Pod Disruption Budgets
+    policies.kyverno.io/category: Resources
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: PodDisruptionBudget
+    policies.kyverno.io/minversion: 1.13.0
+    policies.kyverno.io/description: >-
+      Rejects PodDisruptionBudgets that can never permit a disruption, and budgets that do
+      not say which pods they protect. A budget with maxUnavailable 0 or minAvailable 100%
+      blocks every voluntary eviction, so node drains and cluster upgrades stall with no
+      error anywhere. A budget with an empty selector governs every pod in its namespace
+      on policy/v1 and governed none on the removed policy/v1beta1, so the same manifest
+      reversed meaning across an upgrade. Does not detect a minAvailable equal to the
+      workload's replica count, which has the same effect but cannot be seen from the
+      budget alone.
+spec:
+  background: true
+  rules:
+    - name: disallow-blocking-budgets
+      match:
+        any:
+          # PodDisruptionBudget and nothing else. `Pod` is deliberately not named here —
+          # see the note above on why mixing kinds is the thing to avoid.
+          - resources:
+              kinds:
+                - PodDisruptionBudget
+      exclude:
+        any:
+          # Namespaces, never kinds. Control-plane budgets are excluded because they are
+          # maintained by the components that ship them and are strict on purpose.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      validate:
+        failureAction: Audit
+        message: >-
+          This budget can never permit a voluntary eviction, so a node drain will wait
+          indefinitely. Use maxUnavailable 1 for a workload that can lose a replica, or
+          minAvailable set below the replica count. Confirm with the cluster's own
+          arithmetic in status.disruptionsAllowed, which must not be 0 in steady state.
+        deny:
+          conditions:
+            any:
+              # maxUnavailable and minAvailable are IntOrString, so the same value arrives
+              # as the number 0 or as the string "0%" depending on how it was written.
+              # to_string normalises both before comparison; without it, a budget written
+              # `maxUnavailable: "0%"` would pass a check that only knows about 0.
+              - key: "{{ to_string(not_null(request.object.spec.maxUnavailable, 'unset')) }}"
+                operator: In
+                value:
+                  - "0"
+                  - "0%"
+              - key: "{{ to_string(not_null(request.object.spec.minAvailable, 'unset')) }}"
+                operator: In
+                value:
+                  - "100%"
+
+    - name: require-explicit-budget-selector
+      match:
+        any:
+          - resources:
+              kinds:
+                - PodDisruptionBudget
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      validate:
+        failureAction: Audit
+        message: >-
+          This budget does not say which pods it protects. An empty selector covers every
+          pod in the namespace on policy/v1, and covered none on the removed
+          policy/v1beta1; an unset selector covers none on either. Name the workload with
+          matchLabels or matchExpressions.
+        deny:
+          conditions:
+            all:
+              # Both branches are `all`, so this fires only when NEITHER kind of selector
+              # term is present. That deliberately treats the unset selector and the empty
+              # selector as the same finding: they fail in opposite directions, and which
+              # direction you get depends on the API version rather than on the document.
+              #
+              # not_null supplies an empty container when the path is missing, so an
+              # absent selector and an empty one both reduce to length 0.
+              - key: "{{ length(not_null(request.object.spec.selector.matchLabels, `{}`)) }}"
+                operator: Equals
+                value: 0
+              - key: "{{ length(not_null(request.object.spec.selector.matchExpressions, `[]`)) }}"
+                operator: Equals
+                value: 0

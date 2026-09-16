@@ -14,8 +14,8 @@ operator decides it should.
 |---|---|---|
 | `policies/images/` | Which images may run, from where, and who signed them | shipped |
 | `policies/pod-security/` | How a Pod must be configured to be allowed to run | shipped |
-| `policies/resources/` | What a workload may consume and how it must be spread | planned |
-| `policies/network/` | What network identity a workload must declare | planned |
+| `policies/resources/` | What a workload may consume and how it must be spread | shipped |
+| `policies/network/` | What network identity a workload must declare | shipped |
 | `policies/supply-chain/` | What the build must prove about itself | planned |
 | `policies/generate/` | What Kyverno should create alongside a workload | planned |
 
@@ -38,18 +38,28 @@ Each policy here is written around a specific instance of that:
 | Writing `runAsNonRoot` or `seccompProfile` as a pattern over `spec.containers[]` | Those fields may be set on the Pod, on the container, or on both, and the container wins. A container-level pattern **fails** a Pod that set the field once at the Pod level and inherits it correctly; a Pod-level pattern **misses** a container that overrides it to `false`. One direction floods the report with false findings, the other reports clean. |
 | Turning on the restricted profile and considering the Pod hardened | `readOnlyRootFilesystem` is in neither profile. It was a PodSecurityPolicy field that was not carried into the standards, so a migration from PSP loses it and nothing reports the absence of a rule. |
 | Excluding a Pod Security control with one `exclude[]` entry | A control with restricted fields at **both** the `spec` and `containers[]` levels needs **two** entries. One excludes half of it, the other half keeps rejecting, and the exclusion looks applied — so the investigation starts in the wrong place. |
+| Requiring `resources` on all three container lists, for consistency | The API forbids `resources` on an ephemeral container. The rule describes a Pod that cannot be submitted, so it can never pass, and its whole output is a finding against every `kubectl debug` session. |
+| Writing `maxUnavailable: 0` in a PodDisruptionBudget | It is accepted, healthy and visible in `kubectl get pdb`. The first symptom is a node drain that never finishes, during an upgrade somebody scheduled for a maintenance window. |
+| Leaving a PodDisruptionBudget's `selector` empty | On `policy/v1` an empty selector covers **every pod in the namespace**. On the `policy/v1beta1` API it covered none. The same manifest reversed its meaning across the upgrade that removed that version. |
+| Declaring `topologySpreadConstraints` and checking the field is present | `labelSelector` is optional, and without it the constraint counts no pods and is satisfied by any placement. The field is there, the check passes, and no scheduling decision is ever affected. |
+| Setting `whenUnsatisfiable: ScheduleAnyway` to avoid Pending pods | It converts a visible failure into an invisible one. The scheduler discards the constraint when it cannot be met, so the workload declares spreading and still runs every replica on one node. |
+| Requiring a network label but not its value | `tier: frontned` is a valid label. The Pod runs, the presence check passes, and it is selected by no NetworkPolicy written for `frontend`. |
 
 ## Conventions every policy follows
 
 - **`ClusterPolicy`, one concern per file, one file per `metadata.name`.**
-- **Rules match `Pod` and nothing else**, so Kyverno's auto-generation covers Deployments,
-  DaemonSets, StatefulSets, Jobs, CronJobs and ReplicaSets. See
-  [Auto-Gen Rules](https://kyverno.io/docs/policy-types/cluster-policy/autogen/).
+- **No rule names `Pod` alongside another kind**, so Kyverno's auto-generation covers
+  Deployments, DaemonSets, StatefulSets, Jobs, CronJobs and ReplicaSets. See
+  [Auto-Gen Rules](https://kyverno.io/docs/policy-types/cluster-policy/autogen/). A rule
+  whose subject is not a Pod — a PodDisruptionBudget, say — matches that kind alone and
+  loses nothing: there is no pod template, so there is no rule to generate.
 - **All three container lists are checked** — `containers`, `initContainers` and
   `ephemeralContainers` — with the optional two guarded so an absent list is not a failure.
-  This applies to every rule that enumerates containers itself. A `podSecurity` subrule
-  names no list because it does not iterate one: it hands the Pod to the same library Pod
-  Security Admission uses, which already reads all three.
+  This applies to every rule that enumerates containers itself, except where the field
+  being required cannot legally be set on all three: `resources` is forbidden on an
+  ephemeral container, so requiring it there would be a rule that can never pass. A
+  `podSecurity` subrule names no list because it does not iterate one: it hands the Pod to
+  the same library Pod Security Admission uses, which already reads all three.
 - **Audit by default**, set per rule via `validate.failureAction`, so the enforcement mode
   of a rule is readable beside the rule rather than at the top of the file.
 - **Placeholders only.** Registry hostnames, organisation names and keys are
@@ -94,13 +104,19 @@ Check a manifest before it reaches a cluster:
 kyverno apply policies/images/ --resource my-workload.yaml
 ```
 
-Two policies need editing before their reports mean anything, because the registry
-hostnames, the organisation name and the signing key in them are placeholders:
-`policies/images/restrict-image-registries.yaml` and
-`policies/images/require-image-signatures.yaml`.
-`policies/images/README.md` has the substitution table. Nothing else carries a
-placeholder — the tag policy is registry-agnostic, and the Pod security policies mean
-what they say as shipped, because the Pod Security Standards are the same everywhere.
+Four policies need editing before their reports mean anything, because a registry, an
+organisation, a signing key or a label key in them stands in for one of yours:
+
+| Policy | What to substitute | Table |
+|---|---|---|
+| `policies/images/restrict-image-registries.yaml` | Registry hostnames and the organisation path | [`policies/images/README.md`](policies/images/README.md) |
+| `policies/images/require-image-signatures.yaml` | Registry hostname and the signing key | [`policies/images/README.md`](policies/images/README.md) |
+| `policies/resources/require-topology-spread-constraints.yaml` | The label marking a workload as needing spread | [`policies/resources/README.md`](policies/resources/README.md) |
+| `policies/network/require-network-identity-labels.yaml` | The network tier label key and its allowed values | [`policies/network/README.md`](policies/network/README.md) |
+
+The rest mean what they say as shipped. The tag policy is registry-agnostic; the Pod
+Security Standards are the same everywhere; and a resource request or a disruption budget
+means the same thing in every cluster.
 
 Turn a rule on by changing that rule's `validate.failureAction` from `Audit` to
 `Enforce`. Read the policy report first — the report is the rehearsal.
@@ -115,6 +131,10 @@ Turn a rule on by changing that rule's `validate.failureAction` from `Audit` to
 | `policies/images/README.md` | What each image policy catches, and what it does not |
 | `policies/pod-security/` | Pod configuration: the Pod Security Standards, immutable root filesystem |
 | `policies/pod-security/README.md` | Why these are a `podSecurity` subrule, and how to adopt them |
+| `policies/resources/` | Consumption and placement: requests and limits, disruption budgets, topology spread |
+| `policies/resources/README.md` | The request/limit asymmetry, the budgets that block every drain, and what spreading does not check |
+| `policies/network/` | Network identity: the labels a NetworkPolicy selects on |
+| `policies/network/README.md` | Why this checks labels rather than NetworkPolicies, and what it cannot see |
 | `.yamllint` | Lint configuration shared by the local checks |
 | `LICENSE` | MIT |
 
@@ -129,3 +149,6 @@ Turn a rule on by changing that rule's `validate.failureAction` from `Audit` to
    are different checks, and shipping only the first is a policy that reports clean.
 5. **Say what is not covered.** An excluded namespace, a skipped image reference and a
    cached verification result are all gaps, and each one is written down where it applies.
+6. **Never re-check what the API already rejects.** A rule that can only fire on a request
+   the API server refuses to accept cannot fire at all, and a rule that never fires is
+   indistinguishable in a report from one that is working.

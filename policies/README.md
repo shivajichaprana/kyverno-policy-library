@@ -39,6 +39,12 @@ spec:
         pattern: {}
 ```
 
+A rule uses `deny` with conditions instead of `pattern` where a pattern cannot express the
+check. The two cases that come up here are set membership — a label whose value must be
+one of several — and emptiness: a pattern can require that a key is present, but not that
+a map beneath it has at least one entry. Both appear in `policies/resources/` and
+`policies/network/`, and each one says beside itself why it is not a pattern.
+
 ## Auto-generation
 
 Kyverno generates equivalent rules for Deployments, DaemonSets, StatefulSets, Jobs,
@@ -50,8 +56,14 @@ strengthened. Adding `Deployment` to the `match` block to "cover controllers too
 generation off, and the resulting policy covers Pods and Deployments instead of Pods and
 every controller that creates them.
 
-The consequence for this library is a hard convention: **a rule matches `Pod`, or it is
-not in this library.** Namespace-based `exclude` blocks are fine; they name no kind.
+The consequence for this library is a hard convention: **no rule ever names `Pod`
+alongside another kind.** Namespace-based `exclude` blocks are fine; they name no kind.
+
+A rule whose subject is not a Pod matches that kind alone, and loses nothing by it. A
+PodDisruptionBudget carries no pod template, so there is no equivalent rule for a
+controller to generate; auto-generation has nothing to do and its absence costs nothing.
+The combination that silently narrows coverage is `Pod` plus something else, and that is
+the one the convention forbids.
 
 It also changes where a rejection surfaces. With generation on, a bad Deployment is
 refused at `kubectl apply`. With it off, the Deployment is accepted and its ReplicaSet
@@ -69,8 +81,20 @@ A Pod spec has three lists of containers, and only one of them is mandatory:
 | `ephemeralContainers` | injected later | Added to a **running** Pod by `kubectl debug`, with that Pod's service account and namespace |
 
 A rule that reads only `containers` is not a weaker version of a complete rule — it is a
-rule with a documented bypass. Every rule in this library covers all three, with the two
+rule with a documented bypass. Rules in this library cover all three, with the two
 optional lists guarded by the `=()` conditional anchor so their absence is not a failure.
+
+There is one real exception, and the test that produces it is worth stating as the rule
+itself: **can the field being required legally be set on all three?** `resources` cannot.
+The API forbids it on an ephemeral container, because a Pod's allocation is fixed when the
+Pod is admitted and an ephemeral container joins one that is already running. A rule
+requiring it there would describe a Pod the API server rejects — it could never pass, and
+its only output would be a finding against every `kubectl debug` session. So
+`policies/resources/` covers two lists, deliberately, and says so where it does it.
+
+A `podSecurity` subrule names no list for a different reason: it does not iterate one. It
+hands the Pod to the same library Pod Security Admission uses, which already reads all
+three.
 
 ## Enforcement modes
 

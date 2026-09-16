@@ -1,0 +1,200 @@
+---
+# Where a workload's replicas are allowed to land.
+#
+# Spreading is the control whose absence is hardest to notice, because a workload with
+# every replica on one node behaves exactly like a workload that is properly spread —
+# right up until that node goes away. Until then the Deployment is Available, the replica
+# count is correct, and every probe passes.
+#
+# WHY THIS FILE VALIDATES DECLARED CONSTRAINTS RATHER THAN REQUIRING THEM EVERYWHERE
+#
+# A blanket "every Pod must declare topologySpreadConstraints" is the obvious rule and it
+# is wrong. A single-replica Pod cannot be spread. A Job's Pod is not a replica of
+# anything. A DaemonSet already places exactly one Pod per node, which is the outcome
+# spreading exists to produce. Requiring the field on all of them produces findings that
+# are correct about the field and wrong about the cluster, and the report stops being
+# read — which costs more than the rule was ever going to save.
+#
+# So the shipped position is: whatever a workload declares must actually do something,
+# and WHICH workloads must declare anything is an opt-in the cluster owner marks with a
+# label. That keeps the judgement with the person who knows the replica count, and keeps
+# this file to checks that are true regardless of it.
+#
+# WHAT IS DELIBERATELY NOT CHECKED, BECAUSE THE API ALREADY DOES
+#
+# `maxSkew`, `topologyKey` and `whenUnsatisfiable` are all REQUIRED fields on a topology
+# spread constraint, and `maxSkew` must be greater than zero. A rule requiring them would
+# be re-stating a check the API server already performs and would reject a Pod that
+# cannot be submitted in the first place — a rule that can never fire, which in a policy
+# report is indistinguishable from a rule that is working. Everything below tests
+# something the API accepts.
+#
+# THE TWO WAYS A DECLARED CONSTRAINT DOES NOTHING
+#
+#   1. `labelSelector` is OPTIONAL, and a constraint without one counts no pods. The
+#      scheduler computes the skew across an empty set, finds it satisfied, and places
+#      the Pod wherever it likes. This is the true silent no-op: the field is present,
+#      any check that greps for `topologySpreadConstraints` is satisfied, and the
+#      constraint has no effect on any scheduling decision ever made.
+#
+#      An EMPTY selector is a different mistake in the other direction — it matches every
+#      pod in the namespace, so the workload is spread against its neighbours rather than
+#      against its own replicas. Both are caught here, because in both cases the
+#      constraint does not say what it is spreading.
+#
+#   2. `whenUnsatisfiable: ScheduleAnyway` makes the constraint a preference. The
+#      scheduler prefers a placement that reduces skew and then schedules the Pod anyway
+#      if it cannot find one, so a workload can declare spreading, pass every rule that
+#      checks it declared spreading, and still put every replica on one node.
+#
+# WHY `DoNotSchedule` IS REQUIRED HERE, AND WHY THAT IS THE RULE TO ARGUE WITH
+#
+# `DoNotSchedule` has a real cost: on a cluster with fewer topology domains than the
+# constraint needs, Pods stay Pending. That is a genuine outage risk and it is why many
+# teams reach for `ScheduleAnyway`.
+#
+# The position taken here is that Pending is a failure you can see. It appears in
+# `kubectl get pods`, it fires whatever alerts already watch for unschedulable Pods, and
+# it names its own cause in the scheduler's event. `ScheduleAnyway` converts that visible
+# failure into an invisible one: the Pod runs, the workload looks healthy, and the
+# discovery happens during the node failure the constraint was written to survive.
+#
+# This is the rule in this set most worth disagreeing with, and the disagreement is a
+# cluster-topology question rather than a policy question. If your nodes carry fewer
+# distinct values of the topology key than the workload has replicas, `ScheduleAnyway` is
+# the correct setting and this rule should be dropped rather than worked around. Check
+# before deciding, with the topology key you actually use:
+#
+#     kubectl get nodes -L topology.kubernetes.io/zone
+#
+# WHAT THIS DOES NOT DO
+#
+# It cannot tell whether `topologyKey` names a label the nodes actually carry. A
+# constraint keyed on a label no node has puts every node in one unnamed domain, where
+# any distribution is perfectly balanced and the constraint is satisfied by doing
+# nothing. That is a cluster fact rather than a manifest fact, and the command above is
+# how to check it.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-topology-spread-constraints
+  annotations:
+    policies.kyverno.io/title: Require Effective Topology Spread Constraints
+    policies.kyverno.io/category: Resources
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/minversion: 1.13.0
+    policies.kyverno.io/description: >-
+      Requires that any topology spread constraint a workload declares actually
+      constrains scheduling: it must select the pods it spreads, and it must be a hard
+      requirement rather than a preference the scheduler may discard. Workloads labelled
+      as needing spread must declare a constraint at all. Does not require constraints on
+      every Pod, because a single-replica workload, a Job and a DaemonSet cannot
+      meaningfully be spread. Does not verify that the topology key names a label the
+      nodes carry, which is a property of the cluster rather than the manifest.
+spec:
+  background: true
+  rules:
+    - name: require-spread-label-selector
+      match:
+        any:
+          # Pod and nothing else — a controller kind here would switch OFF Kyverno's
+          # auto-generation for Pod controllers and narrow this rule's coverage.
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          # Namespaces, never kinds.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      validate:
+        failureAction: Audit
+        message: >-
+          Every topology spread constraint must select the pods it spreads. A constraint
+          with no labelSelector counts no pods and is satisfied by any placement; one with
+          an empty selector spreads this workload against every pod in the namespace.
+          Select the workload's own pods with matchLabels or matchExpressions.
+        deny:
+          conditions:
+            any:
+              # Counts the declared constraints that name nothing, which covers both the
+              # absent selector and the empty one. A pattern cannot express "this map has
+              # at least one key", so this is a filter expression rather than a pattern;
+              # the same technique, and the same reason, as the disruption-budget rules.
+              #
+              # not_null supplies an empty container for every optional level, so a Pod
+              # with no constraints at all yields an empty list and denies nothing.
+              - key: "{{ length(not_null(request.object.spec.topologySpreadConstraints, `[]`)[?length(not_null(labelSelector.matchLabels, `{}`)) == `0` && length(not_null(labelSelector.matchExpressions, `[]`)) == `0`]) }}"
+                operator: GreaterThan
+                value: 0
+
+    - name: require-enforced-spread
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      validate:
+        failureAction: Audit
+        message: >-
+          A topology spread constraint must set whenUnsatisfiable to DoNotSchedule.
+          ScheduleAnyway is a preference the scheduler discards when it cannot be met, so
+          the workload can declare spreading and still place every replica on one node.
+          If the cluster has fewer topology domains than the workload has replicas, this
+          rule is the wrong rule for that cluster rather than one to work around.
+        pattern:
+          spec:
+            # `=()` applies the check only when the key is present, so a Pod that declares
+            # no constraints is not a failure — which workloads must declare one is the
+            # separate, label-gated rule below. The list pattern applies to every element.
+            =(topologySpreadConstraints):
+              - whenUnsatisfiable: DoNotSchedule
+
+    - name: require-spread-for-labelled-workloads
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      preconditions:
+        all:
+          # Opt-in by label, because whether a workload can be spread depends on its
+          # replica count and its kind, neither of which this rule can see. The backtick
+          # form is a JMESPath JSON literal, used here so the expression needs no single
+          # quotes and the YAML scalar needs no escaping.
+          - key: '{{ not_null(request.object.metadata.labels."resilience.example.com/spread", `"unset"`) }}'
+            operator: Equals
+            value: required
+      validate:
+        failureAction: Audit
+        message: >-
+          This workload is labelled as requiring topology spread but declares no
+          topologySpreadConstraints. Add a constraint, or remove the label if the workload
+          cannot be spread.
+        pattern:
+          spec:
+            # No `=()` anchor: the key is required to be present, and the element pattern
+            # requires a non-empty topologyKey so an empty list does not satisfy it.
+            topologySpreadConstraints:
+              - topologyKey: "?*"

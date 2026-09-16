@@ -1,0 +1,161 @@
+---
+# What a container is allowed to consume, declared rather than discovered.
+#
+# A container with no resource requests is scheduled as BestEffort. The scheduler places
+# it anywhere, because it has been told it needs nothing, and the kubelet evicts it first
+# when the node comes under pressure. Neither of those is reported as a misconfiguration;
+# they are reported as a workload that is slow, or that keeps restarting on one node and
+# not another, which sends the investigation somewhere else entirely.
+#
+# WHY THIS RULE DELIBERATELY DOES NOT COVER ephemeralContainers
+#
+# Every other container-level rule in this library covers all three container lists,
+# because a rule that reads only `containers` has a documented bypass. This one covers
+# two, and the exception is not an oversight:
+#
+#   The Kubernetes API does not permit `resources` on an ephemeral container at all.
+#   Pod resource allocations are fixed when the Pod is admitted, and an ephemeral
+#   container is added to a Pod that is already running, so it is given no allocation of
+#   its own and runs inside whatever the Pod already holds.
+#
+# A pattern requiring `resources` on `ephemeralContainers` would therefore describe a Pod
+# the API server will not accept. It could never pass, and its only possible output is a
+# finding against every `kubectl debug` session anybody runs — a rule whose entire
+# contribution is noise, in a report whose value depends on being read.
+#
+# The general convention is the right default and this is a real exception to it, so it
+# is written here rather than left to be rediscovered. The check to apply when adding a
+# container-level rule is not "did I list all three" but "can the field being required
+# legally be set on all three".
+#
+# WHY MEMORY LIMITS ARE REQUIRED AND CPU LIMITS ARE NOT
+#
+# The two resources fail in different ways, and treating them the same is the more
+# common mistake:
+#
+#   Memory is incompressible. A container over its request cannot be slowed down, only
+#   killed, and a container with no limit can consume the node until the kubelet starts
+#   evicting neighbours that did nothing wrong. The blast radius of a missing memory
+#   limit lands on other workloads.
+#
+#   CPU is compressible. A container over its request is throttled, and the cost of that
+#   lands on itself. A CPU limit adds throttling that applies even when the node is idle,
+#   which is a real and frequently surprising latency cost.
+#
+# So the shipped position is: request both, limit memory. That is a position and not a
+# fact, and the counter-argument is worth stating — a cluster that bills by limit, or one
+# that needs each workload to perform identically whatever else is running, has good
+# reason to require CPU limits too. Add a third rule if that is your cluster. What should
+# not happen is requiring all four without deciding, and then discovering the throttling
+# months later in a latency graph.
+#
+# WHAT THIS DOES NOT DO
+#
+# It reads the Pod as it arrives at the admission webhook, which is not necessarily the
+# Pod the author wrote. A LimitRange in the namespace supplies defaults, and where it
+# does, this rule sees the defaulted values and reports the Pod as compliant. That is the
+# correct verdict — the values are real and they will be enforced — but it means a clean
+# report is not evidence that any author made a deliberate choice. If you want that
+# distinction, the place to find it is the manifests in source control, not the cluster.
+#
+# It also says nothing about whether the declared numbers are RIGHT. A request of 1m CPU
+# is a declaration, and this rule accepts it.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resource-requests-and-limits
+  annotations:
+    policies.kyverno.io/title: Require Resource Requests and Memory Limits
+    policies.kyverno.io/category: Resources
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/minversion: 1.13.0
+    policies.kyverno.io/description: >-
+      Requires every container to declare CPU and memory requests, and a memory limit.
+      Covers containers and initContainers; ephemeralContainers are deliberately excluded
+      because the Kubernetes API does not permit resources on them, so requiring one
+      would describe a Pod that cannot exist. A CPU limit is deliberately not required,
+      because CPU is compressible and a limit adds throttling that applies even on an
+      idle node. Does not judge whether the declared values are appropriate, and cannot
+      distinguish a value the author chose from one a LimitRange supplied.
+spec:
+  # Background scanning reports on Pods that already exist, which is how a cluster
+  # adopting this library finds out what it is already running before anything blocks.
+  background: true
+  rules:
+    - name: require-resource-requests
+      match:
+        any:
+          # Pod and nothing else. Naming a controller kind here would switch OFF
+          # Kyverno's auto-generation for Pod controllers and narrow the coverage of
+          # this rule to exactly the kinds listed.
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          # Namespaces, never kinds. This is a real gap and not a safe one: anyone able
+          # to create a Pod in these namespaces is outside every rule in this library.
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      validate:
+        failureAction: Audit
+        message: >-
+          Every container must declare CPU and memory requests. Without them the Pod is
+          BestEffort: the scheduler places it as though it needs nothing, and the kubelet
+          evicts it first when the node runs short.
+        pattern:
+          spec:
+            # `?*` requires the field to be present and non-empty. A quantity is a string
+            # in the serialised object the webhook receives — `cpu: 0.5` reaches this
+            # rule as `"500m"` — so a string wildcard is the right test for a value that
+            # was written as a number.
+            #
+            # `=()` applies the check only when the key is present, so a Pod with no
+            # initContainers is not a failure. ephemeralContainers are absent from this
+            # pattern on purpose; see the note at the top of this file.
+            =(initContainers):
+              - resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+            containers:
+              - resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+
+    - name: require-memory-limits
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      validate:
+        failureAction: Audit
+        message: >-
+          Every container must declare a memory limit. Memory cannot be reclaimed by
+          slowing a container down, so a container without a limit is bounded only by the
+          node, and the workloads evicted when it grows are its neighbours.
+        pattern:
+          spec:
+            =(initContainers):
+              - resources:
+                  limits:
+                    memory: "?*"
+            containers:
+              - resources:
+                  limits:
+                    memory: "?*"
