@@ -1,0 +1,60 @@
+---
+# The permission without which the policy beside this file does nothing at all.
+#
+# Kyverno runs as several controllers, each with its own ServiceAccount, and each is
+# granted only what it needs for its own resources. Creating a NetworkPolicy is not
+# among them. A generate rule targeting a resource the background controller cannot
+# create is accepted by the API server, reported as Ready, and never produces anything —
+# there is no admission failure to see, because generation does not happen during
+# admission.
+#
+# Permissions are added by aggregation rather than by editing Kyverno's own ClusterRoles,
+# which are managed by its chart and would lose the edit on the next upgrade. A
+# ClusterRole carrying the label below is merged into the background controller's role by
+# the aggregation controller.
+#
+# WHY THIS FILE LIVES IN A POLICY DIRECTORY
+#
+# Every other directory under `policies/` holds Kyverno policies and nothing else, and a
+# set is applied as a unit. This one is the exception, and the test that produces it is
+# narrow: a non-policy file belongs in a set only when the policies in that set cannot
+# function without it. Splitting the grant into a separate tree would mean the directory
+# that looks self-contained is the one that silently does nothing — which is the failure
+# this whole library is written to avoid, reproduced in its own layout.
+#
+# CONFIRM IT TOOK EFFECT
+#
+# Aggregation is not instant and is easy to assume:
+#
+#   kubectl get clusterrole kyverno:background-controller -o yaml | grep -A3 networkpolicies
+#
+# If the verbs are not there, nothing below is in effect and the generate policy will keep
+# reporting healthy.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kyverno:generate-networkpolicies
+  labels:
+    # The label that merges this role into the background controller's ClusterRole. The
+    # other Kyverno controllers have their own aggregation labels; this is the only one
+    # that matters for generate rules, and granting the admission controller instead is a
+    # common way to change nothing.
+    rbac.kyverno.io/aggregate-to-background-controller: "true"
+rules:
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - networkpolicies
+    verbs:
+      # create/update/patch produce and reconcile the resource. get/list/watch are what
+      # `synchronize: true` needs in order to notice a generated policy has been edited or
+      # removed. delete is needed for cleanup when a namespace stops matching, or when the
+      # policy is removed with orphaning turned off — without it, removal fails silently
+      # and stale policies stay behind.
+      - create
+      - update
+      - patch
+      - delete
+      - get
+      - list
+      - watch

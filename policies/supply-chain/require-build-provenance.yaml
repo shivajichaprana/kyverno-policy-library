@@ -1,0 +1,141 @@
+---
+# A signature answers one question: who published this statement. It never answers whether
+# the statement is TRUE, and it never answers whether the statement is RELEVANT. Every
+# failure in this file comes from forgetting that.
+#
+# THE MISTAKE THIS FILE EXISTS TO AVOID
+#
+# The `conditions` block below is optional. An attestation check written without it
+# verifies that a signed document of the declared predicate type exists and was signed by
+# the expected identity — and nothing whatsoever about what the document says. A
+# provenance statement asserting that the image was built by hand, on a laptop, from
+# uncommitted source, passes that check completely, because it was correctly signed by the
+# identity the policy trusts.
+#
+# From outside, that is indistinguishable from real provenance enforcement. The policy
+# reports success, the dashboard is green, and the control everyone believes is running
+# has never once read the field it exists to read. `attestors` pins WHO SIGNED. Conditions
+# are the only part that pins WHAT WAS SAID. Both are required, and only one of them is
+# enforced by the schema.
+#
+# THE PREDICATE TYPE AND THE CONDITION PATHS ARE ONE DECISION
+#
+# `predicateType` selects which attestation is read. The condition keys are JMESPath over
+# that attestation's contents. They must be changed together, because SLSA v0.2 and SLSA
+# v1 are not the same document with a version bump — they are different shapes:
+#
+#   v0.2   builder.id            buildType              invocation.configSource.uri
+#   v1     runDetails.builder.id buildDefinition.buildType
+#                                buildDefinition.externalParameters.workflow.repository
+#
+# Point v1 conditions at a v0.2 predicate and every path resolves to nothing. This file
+# targets v1 and keys only on fields the v1 schema itself guarantees.
+#
+# WHY EVERY CONDITION CARRIES A `|| ''` FALLBACK
+#
+# Not defensive padding. An unresolvable variable makes Kyverno report a rule ERROR rather
+# than a rule failure, and an error reads as "the admission controller is broken" rather
+# than "this image did not meet the requirement" — so the finding sends whoever picks it
+# up to the wrong place. The fallback turns a shape mismatch into a readable failure with
+# the message below attached to it.
+#
+# WHAT IS INHERITED FROM THE IMAGE SIGNING POLICY AND NOT REPEATED
+#
+#   Scope. `imageReferences` matches only images this organisation builds. A pattern of
+#   `"*"` would demand provenance from every vendor image in the cluster.
+#   Caching. A successful verification is cached for 60 minutes by default, so revoking
+#   trust does not take effect until that entry expires.
+#   Background scanning is off, because a background scan carries no pull secrets.
+#   Enforcement uses the deprecated policy-level field, because Kyverno documents no
+#   per-rule `failureAction` for `verifyImages`.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-build-provenance
+  annotations:
+    policies.kyverno.io/title: Require Build Provenance
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/minversion: 1.13.0
+    policies.kyverno.io/description: >-
+      Requires a signed SLSA v1 provenance attestation on images published from the
+      internal registry, and reads the builder identity and build type out of it rather
+      than accepting that a correctly signed document exists. Images outside that
+      registry are not matched and are not checked.
+spec:
+  # Deprecated as of 1.13 and kept deliberately: the per-rule replacement covers
+  # `validate` rules only, and this is a `verifyImages` rule.
+  validationFailureAction: Audit
+
+  # A background scan runs without the admission request and therefore without the Pod's
+  # pull secrets, so it reaches a private registry unauthenticated. The findings that
+  # produces describe the scanner rather than the image.
+  background: false
+
+  webhookConfiguration:
+    # A Kyverno outage blocks admission rather than quietly admitting unverified images.
+    # The alternative, `Ignore`, also ignores a failed call to the registry, which turns a
+    # registry outage into images admitted without provenance — fail-open on the one
+    # control this policy provides.
+    failurePolicy: Fail
+    # Fetching and verifying an attestation is several registry round-trips. 30s is the
+    # documented maximum.
+    timeoutSeconds: 30
+
+  rules:
+    - name: verify-slsa-provenance
+      match:
+        any:
+          # Pod and nothing else, so auto-generation extends this to Pod controllers.
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      verifyImages:
+        - imageReferences:
+            - "registry.example.com/*"
+          # Set explicitly rather than left to the default. A default that changes between
+          # releases is a control that can disappear without a commit to explain it.
+          required: true
+          # Provenance describes how an image was built. It does not make the tag
+          # immutable, so the digest rewrite stays with the signing policy, which is the
+          # one rule that should own the image field.
+          mutateDigest: false
+          verifyDigest: false
+          attestations:
+            - predicateType: https://slsa.dev/provenance/v1
+              attestors:
+                # WHO SIGNED. Keyless: the certificate's identity is checked against the
+                # workflow that is permitted to publish provenance, and the entry is
+                # confirmed present in the transparency log.
+                - count: 1
+                  entries:
+                    - keyless:
+                        subject: "https://github.com/<your-org>/*/.github/workflows/*"
+                        issuer: https://token.actions.githubusercontent.com
+                        rekor:
+                          url: https://rekor.sigstore.dev
+              conditions:
+                # WHAT WAS SAID. Without this block the rule above is the whole check.
+                - all:
+                    # The document must claim it was produced by the same builder whose
+                    # identity signed it. A signer and a claimed builder are allowed to
+                    # differ — that is precisely what a forged-but-correctly-signed
+                    # provenance statement looks like.
+                    - key: "{{ runDetails.builder.id || '' }}"
+                      operator: Equals
+                      value: https://github.com/<your-org>/<your-repo>/.github/workflows/release.yaml@refs/heads/main
+                    # The build must have gone through the hosted workflow build type. A
+                    # provenance document produced by a local build declares a different
+                    # one, and this is the field that says so.
+                    - key: "{{ buildDefinition.buildType || '' }}"
+                      operator: Equals
+                      value: https://actions.github.io/buildtypes/workflow/v1

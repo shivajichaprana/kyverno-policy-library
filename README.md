@@ -4,9 +4,13 @@ A curated library of [Kyverno](https://kyverno.io) admission policies for Kubern
 organised by the thing each set protects: what images may run, how Pods must be
 configured, what they may consume, and what the supply chain must prove.
 
-Every policy in this library ships in **Audit** mode. A policy library dropped into a
-live cluster in Enforce mode is an outage, so nothing here blocks anything until an
+Every validating policy in this library ships in **Audit** mode. A policy library dropped
+into a live cluster in Enforce mode is an outage, so nothing here blocks anything until an
 operator decides it should.
+
+A generate policy has no audit mode — it creates the resource or it does not — so
+`policies/generate/` expresses the same default a different way: it matches only
+namespaces carrying an opt-in label, and so acts on nothing until one is labelled.
 
 ## What this library covers
 
@@ -16,8 +20,8 @@ operator decides it should.
 | `policies/pod-security/` | How a Pod must be configured to be allowed to run | shipped |
 | `policies/resources/` | What a workload may consume and how it must be spread | shipped |
 | `policies/network/` | What network identity a workload must declare | shipped |
-| `policies/supply-chain/` | What the build must prove about itself | planned |
-| `policies/generate/` | What Kyverno should create alongside a workload | planned |
+| `policies/supply-chain/` | What the build must prove about itself | shipped |
+| `policies/generate/` | What Kyverno should create alongside a workload | shipped |
 
 ## The failures these policies are written around
 
@@ -44,6 +48,14 @@ Each policy here is written around a specific instance of that:
 | Declaring `topologySpreadConstraints` and checking the field is present | `labelSelector` is optional, and without it the constraint counts no pods and is satisfied by any placement. The field is there, the check passes, and no scheduling decision is ever affected. |
 | Setting `whenUnsatisfiable: ScheduleAnyway` to avoid Pending pods | It converts a visible failure into an invisible one. The scheduler discards the constraint when it cannot be met, so the workload declares spreading and still runs every replica on one node. |
 | Requiring a network label but not its value | `tier: frontned` is a valid label. The Pod runs, the presence check passes, and it is selected by no NetworkPolicy written for `frontend`. |
+| Verifying an attestation without a `conditions` block | `attestors` pins who signed; `conditions` is the only part that reads what was signed, and it is optional. Provenance asserting the image was built by hand on a laptop passes completely, as long as the signature is right. |
+| Asking an SBOM whether it contains a forbidden package | A filter over an empty list returns an empty list, which satisfies `AllNotIn`. An SBOM listing nothing — or an SPDX document, which calls them `packages` — passes the same way a genuinely clean image does. |
+| Requiring a signed vulnerability scan | The signature proves the scan ran, never that the result is still true. A clean scan from eighteen months ago verifies perfectly, and a scan from an hour ago against a six-month-old database reports zero findings for the same reason a clean image does. |
+| Applying a generate policy without granting the background controller RBAC | The policy is accepted and `kubectl get clusterpolicy` shows it Ready. Nothing is ever created, and nothing fails — generation does not happen during admission, so there is no admission failure to report. |
+| Leaving `generateExisting` at its default | Only namespaces created after the policy get anything. Every namespace that already existed stays unprotected, and because no rule was triggered for them, no gap is reported. |
+| Naming one direction in a NetworkPolicy's `policyTypes` | A resource called `default-deny` is present in every namespace with ingress entirely unrestricted. The name is doing the work the spec is not. |
+| Splitting `namespaceSelector` and `podSelector` into two peer list items | In one item they mean AND; in two they mean OR. One hyphen turns "kube-dns pods in kube-system" into "every pod in kube-system, or any pod with that label anywhere". Both parse. |
+| Creating NetworkPolicies on a cluster whose CNI ignores them | Every resource is created correctly and enforces nothing. `kubectl get networkpolicy -A` is identical either way — all the evidence is present and none of it is true. |
 
 ## Conventions every policy follows
 
@@ -104,8 +116,8 @@ Check a manifest before it reaches a cluster:
 kyverno apply policies/images/ --resource my-workload.yaml
 ```
 
-Four policies need editing before their reports mean anything, because a registry, an
-organisation, a signing key or a label key in them stands in for one of yours:
+Some policies need editing before their reports mean anything, because a registry, an
+organisation, a signing identity or a label key in them stands in for one of yours:
 
 | Policy | What to substitute | Table |
 |---|---|---|
@@ -113,6 +125,10 @@ organisation, a signing key or a label key in them stands in for one of yours:
 | `policies/images/require-image-signatures.yaml` | Registry hostname and the signing key | [`policies/images/README.md`](policies/images/README.md) |
 | `policies/resources/require-topology-spread-constraints.yaml` | The label marking a workload as needing spread | [`policies/resources/README.md`](policies/resources/README.md) |
 | `policies/network/require-network-identity-labels.yaml` | The network tier label key and its allowed values | [`policies/network/README.md`](policies/network/README.md) |
+| `policies/supply-chain/require-build-provenance.yaml` | Registry pattern, signing identity and the builder identity your provenance declares | [`policies/supply-chain/README.md`](policies/supply-chain/README.md) |
+| `policies/supply-chain/require-sbom-attestation.yaml` | Registry pattern, signing identity and the banned dependency list | [`policies/supply-chain/README.md`](policies/supply-chain/README.md) |
+| `policies/supply-chain/require-recent-vulnerability-scan.yaml` | Registry pattern and signing identity | [`policies/supply-chain/README.md`](policies/supply-chain/README.md) |
+| `policies/generate/add-default-network-policies.yaml` | The opt-in namespace label, and the DNS pod labels if the cluster is not a default CoreDNS install | [`policies/generate/README.md`](policies/generate/README.md) |
 
 The rest mean what they say as shipped. The tag policy is registry-agnostic; the Pod
 Security Standards are the same everywhere; and a resource request or a disruption budget
@@ -135,6 +151,10 @@ Turn a rule on by changing that rule's `validate.failureAction` from `Audit` to
 | `policies/resources/README.md` | The request/limit asymmetry, the budgets that block every drain, and what spreading does not check |
 | `policies/network/` | Network identity: the labels a NetworkPolicy selects on |
 | `policies/network/README.md` | Why this checks labels rather than NetworkPolicies, and what it cannot see |
+| `policies/supply-chain/` | Build evidence: provenance, SBOM, vulnerability-scan freshness |
+| `policies/supply-chain/README.md` | What a signature proves, the check that verifies nothing, and why predicate types are exact strings |
+| `policies/generate/` | The namespace network baseline Kyverno creates, and the RBAC it needs to create it |
+| `policies/generate/README.md` | Why this set has no audit mode, and four ways it creates nothing while looking correct |
 | `.yamllint` | Lint configuration shared by the local checks |
 | `LICENSE` | MIT |
 
@@ -152,3 +172,9 @@ Turn a rule on by changing that rule's `validate.failureAction` from `Audit` to
 6. **Never re-check what the API already rejects.** A rule that can only fire on a request
    the API server refuses to accept cannot fire at all, and a rule that never fires is
    indistinguishable in a report from one that is working.
+7. **A signature is an author, not a fact.** Verifying who published a statement is the
+   easy half. Reading what the statement says, and whether it is still true, is the half
+   that is optional in the schema and therefore the half that gets left out.
+8. **A rule that creates something starts matching nothing.** There is no audit mode for
+   generation, so the rehearsal is an empty match condition and the decision to act is a
+   label somebody applies.

@@ -1,0 +1,178 @@
+---
+# Every other policy in this library reports. This one CREATES, and that difference has
+# consequences worth stating before the rules.
+#
+# A GENERATE RULE HAS NO AUDIT MODE
+#
+# `failureAction` does not apply here. A generate rule either creates the resource or it
+# does not; there is no setting that makes it describe what it would have created. So the
+# safe-by-default position this library takes everywhere else is expressed differently:
+# the rules below match only namespaces that carry an opt-in label. As shipped, they act
+# on nothing. Label a namespace and they act on that one.
+#
+# That is not decoration. A default-deny NetworkPolicy dropped into a namespace whose
+# workloads are already running cuts them off from everything the moment it lands, and the
+# blast radius of getting the rollout order wrong is the whole cluster at once.
+#
+# THE FOUR WAYS THIS DOES NOTHING WHILE LOOKING CORRECT
+#
+#   1. The background controller has no permission to create a NetworkPolicy. This is the
+#      first thing to check and the one nothing tells you about: the policy is accepted,
+#      `kubectl get clusterpolicy` shows it Ready, the rules are valid, and no
+#      NetworkPolicy is ever created in any namespace. Kyverno's controllers each run with
+#      their own ServiceAccount and are granted nothing beyond their own resources by
+#      default. `background-controller-rbac.yaml` beside this file is what grants it, and
+#      applying this policy without that file produces exactly the symptom above.
+#
+#   2. `generateExisting` is off. The default is false, which means only namespaces
+#      created AFTER the policy get anything. Every namespace that already existed —
+#      which, in a cluster old enough to need this, is all of them — stays unprotected,
+#      and nothing reports a gap because no rule was triggered for them.
+#
+#   3. The cluster's CNI does not implement NetworkPolicy. The API accepts a NetworkPolicy
+#      whatever is installed; enforcing it is the network plugin's job, and a plugin
+#      without that support silently ignores every one of them. `kubectl get networkpolicy
+#      -A` looks identical either way. Confirm the CNI enforces policy before believing
+#      any of this, because this is the case where all the evidence is present and none of
+#      it is true.
+#
+#   4. The policy denies only one direction. A NetworkPolicy affects exactly the
+#      directions named in `policyTypes`. A resource called `default-deny` with
+#      `policyTypes: [Egress]` and nothing else leaves ingress completely unrestricted —
+#      and it is present, named correctly, and visible in every namespace, so the name is
+#      doing all the work that the spec is not. Both directions are named below.
+#
+# WHY DNS IS GENERATED ALONGSIDE AND NOT AFTERWARDS
+#
+# Deny-all egress blocks name resolution, because resolution is egress to kube-dns. Every
+# lookup in the namespace fails, and the symptom is not a network error — it is
+# applications failing to reach things by name, which reads as an application problem and
+# sends the investigation to the wrong team. The two rules live in one file so that the
+# deny cannot be applied without the exception that makes it survivable.
+#
+# The DNS rule allows UDP and TCP on 53. DNS falls back to TCP for responses too large for
+# a UDP datagram, so a UDP-only allowance works for most queries and fails for some — an
+# intermittent, size-dependent failure, which is worse to diagnose than a total one.
+#
+# AND THE SELECTOR TRAP IT IS WRITTEN AROUND
+#
+# In a NetworkPolicy peer list, `namespaceSelector` and `podSelector` in the SAME list
+# item mean AND — pods matching that selector, in namespaces matching that one. Put in TWO
+# items they mean OR — every pod in those namespaces, or pods with that label anywhere.
+# One hyphen is the entire difference, both parse, and the second admits far more than
+# intended. The rule below keeps them in one item deliberately.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: add-default-network-policies
+  annotations:
+    policies.kyverno.io/title: Add Default Network Policies
+    policies.kyverno.io/category: Generate
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Namespace, NetworkPolicy
+    policies.kyverno.io/minversion: 1.13.0
+    policies.kyverno.io/description: >-
+      Creates a deny-all NetworkPolicy covering both ingress and egress, plus the DNS
+      egress exception that keeps the namespace usable, in every namespace carrying the
+      opt-in label. Acts on no namespace until one is labelled, because a generate rule
+      has no audit mode and a default-deny applied to a running namespace is an outage.
+spec:
+  # Also act on namespaces that already exist, not only ones created from now on. Without
+  # this, the policy protects nothing that was there before it and reports no gap.
+  generateExisting: true
+
+  rules:
+    - name: add-deny-all
+      match:
+        any:
+          # Namespace alone. `selector` here applies to the matched resource, which for a
+          # Namespace trigger is the namespace's own labels — this is the opt-in.
+          - resources:
+              kinds:
+                - Namespace
+              selector:
+                matchLabels:
+                  network-baseline.example.com/enabled: "true"
+      generate:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        name: default-deny-all
+        namespace: "{{ request.object.metadata.name }}"
+        # Put it back if it is edited or deleted. Without this, a namespace silently
+        # loses its baseline the moment somebody removes the resource, and the only
+        # evidence is an absence.
+        synchronize: true
+        # Leave the generated policies in place if this policy is deleted. The default,
+        # false, removes every one of them across every namespace the instant the
+        # ClusterPolicy goes — which for a deny rule means uninstalling the policy opens
+        # the network everywhere at once. The trade is that orphaned policies are no
+        # longer reconciled by anything and have to be cleaned up by hand; for a control
+        # whose failure direction is open, that is the better half of the trade.
+        orphanDownstreamOnPolicyDelete: true
+        data:
+          metadata:
+            labels:
+              app.kubernetes.io/managed-by: kyverno
+              network-baseline.example.com/generated: "true"
+          spec:
+            # Every pod in the namespace.
+            podSelector: {}
+            # BOTH directions. Naming only one leaves the other unrestricted while the
+            # resource still reads as a default deny.
+            policyTypes:
+              - Ingress
+              - Egress
+            # No `ingress` or `egress` rules: selecting traffic types without listing any
+            # permitted peers is how a NetworkPolicy denies. An empty list would say the
+            # same thing; omitting the keys avoids the reader having to decide whether an
+            # empty list was deliberate.
+
+    - name: add-dns-egress
+      match:
+        any:
+          - resources:
+              kinds:
+                - Namespace
+              selector:
+                matchLabels:
+                  network-baseline.example.com/enabled: "true"
+      generate:
+        apiVersion: networking.k8s.io/v1
+        kind: NetworkPolicy
+        name: allow-dns-egress
+        namespace: "{{ request.object.metadata.name }}"
+        synchronize: true
+        orphanDownstreamOnPolicyDelete: true
+        data:
+          metadata:
+            labels:
+              app.kubernetes.io/managed-by: kyverno
+              network-baseline.example.com/generated: "true"
+          spec:
+            podSelector: {}
+            policyTypes:
+              - Egress
+            egress:
+              - to:
+                  # ONE list item carrying both selectors: kube-dns pods, in kube-system.
+                  # Splitting these into two items would allow every pod in kube-system
+                  # and every pod labelled k8s-app=kube-dns in any namespace.
+                  - namespaceSelector:
+                      matchLabels:
+                        # Set automatically by Kubernetes on every namespace since 1.21.
+                        kubernetes.io/metadata.name: kube-system
+                    podSelector:
+                      matchLabels:
+                        # The label CoreDNS carries in a default installation. Confirm it
+                        # against the cluster — a CNI-provided or customised DNS
+                        # deployment may label its pods differently, and a selector that
+                        # matches no pod produces an allowance that permits nothing while
+                        # appearing to permit DNS.
+                        k8s-app: kube-dns
+                ports:
+                  - protocol: UDP
+                    port: 53
+                  # TCP as well: DNS falls back to TCP for large responses, so allowing
+                  # only UDP fails for some queries and not others.
+                  - protocol: TCP
+                    port: 53

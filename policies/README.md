@@ -1,8 +1,15 @@
 # Policy sets
 
 Each directory under `policies/` holds one concern. A directory is applied as a unit —
-`kubectl apply -f policies/<set>/` — so every file in it is expected to be a valid
-Kyverno policy and nothing else.
+`kubectl apply -f policies/<set>/` — so a file in it is a Kyverno policy unless the
+policies in that set cannot function without it.
+
+There is one such file, and the test that admits it is narrow: `policies/generate/` ships
+the ClusterRole granting Kyverno's background controller permission to create the
+resources its rules generate. Without that grant the policy is accepted, reported healthy,
+and creates nothing at all. Keeping the grant in a separate tree would make the directory
+that looks self-contained the one that silently does nothing — the exact failure this
+library is written to avoid, reproduced in its own layout.
 
 ## Structure of a policy in this library
 
@@ -108,10 +115,30 @@ Move a rule to `Enforce` only after its report has been clean for long enough to
 it. `failureActionOverrides` can raise a single namespace to `Enforce` ahead of the rest,
 which is the usual way to prove a rule in one place before turning it on everywhere.
 
+A **generate** rule has no audit mode, and no enforce mode either. It creates the resource
+or it does not, and there is no setting that makes it describe what it would have created. The equivalent safe default
+is a match condition that starts empty: `policies/generate/` acts only on namespaces
+carrying an opt-in label, so as shipped it acts on nothing and is turned on one namespace
+at a time.
+
 Image verification rules are the exception, and deliberately so: Kyverno documents no
 per-rule `failureAction` for `verifyImages`, so those policies still carry the
 policy-level `validationFailureAction`. That field is deprecated, its documented
-replacement covers `validate` rules only, and the file that uses it says so.
+replacement covers `validate` rules only, and every file that uses it says so.
+
+## Attestation rules
+
+A `verifyImages` rule carrying an `attestations` block has one optional part that does all
+the work. `attestors` is required and pins **who signed** the statement. `conditions` is
+optional and is the only part that pins **what the statement says** — so a rule with
+attestors and no conditions verifies that a correctly signed document of the right type
+exists, and nothing whatever about its contents.
+
+Every attestation rule in this library carries conditions, and every condition key uses a
+`|| ''` fallback. That is not defensive padding: an unresolvable variable makes Kyverno
+report a rule **error** rather than a rule failure, and an error reads as the admission
+controller being broken rather than the image failing a check, which sends whoever picks
+up the finding to the wrong place.
 
 ## Testing
 

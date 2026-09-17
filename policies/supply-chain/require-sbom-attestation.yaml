@@ -1,0 +1,181 @@
+---
+# An SBOM is only evidence if something reads it. This file is built around the fact that
+# the natural way to read one passes when there is nothing there.
+#
+# THE VACUOUS "MUST NOT CONTAIN" CHECK
+#
+# The usual SBOM rule asks whether a forbidden package is listed:
+#
+#   key: "{{ components[?name=='log4j-core'].version || 'none' }}"
+#   operator: AllNotIn
+#   value: ["2.0", ... ]
+#
+# That is correct, and it is also satisfied by an SBOM with NO COMPONENTS AT ALL. A filter
+# over an empty list returns an empty list, nothing is in the forbidden set, and the rule
+# passes. So does an SBOM in a different format: SPDX calls them `packages`, so
+# `components` resolves to nothing and every component-shaped question about an SPDX
+# document answers "not present" rather than "wrong shape".
+#
+# Both produce the same report entry as a genuinely clean image, which is why this policy
+# checks the SBOM is what it claims to be and is non-trivial BEFORE it asks what is in it.
+# A must-not-contain check is only as good as the evidence that there was something to
+# look at.
+#
+# THE FORMAT CHECK IS THE ONE THAT PROTECTS THE OTHERS
+#
+# `bomFormat` is a field CycloneDX documents carry and SPDX documents do not. Every other
+# condition here is a JMESPath over an assumed shape, and if the shape is wrong they all
+# resolve to nothing and quietly agree with each other. This one condition is what turns
+# that silent agreement into a finding.
+#
+# WHAT AN SBOM STILL DOES NOT TELL YOU
+#
+#   It describes the image at BUILD time. Anything installed at runtime is not in it.
+#   It is only as complete as the scanner that produced it; a package manager the
+#   generator does not understand contributes nothing and leaves no gap behind.
+#   It is a claim, signed by whoever built it. The signature makes it attributable, not
+#   accurate.
+#
+# The freshness question — is this evidence still true? — belongs to the vulnerability
+# scan policy in this set, not here. An SBOM does not go stale; the conclusions drawn
+# from it do.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-sbom-attestation
+  annotations:
+    policies.kyverno.io/title: Require SBOM Attestation
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/minversion: 1.13.0
+    policies.kyverno.io/description: >-
+      Requires a signed CycloneDX SBOM attestation on images from the internal registry,
+      confirms the document is CycloneDX and lists at least one component before drawing
+      any conclusion from it, and rejects images whose SBOM lists a forbidden package
+      version. An empty or wrongly formatted SBOM fails rather than passing silently.
+spec:
+  validationFailureAction: Audit
+  background: false
+  webhookConfiguration:
+    failurePolicy: Fail
+    timeoutSeconds: 30
+
+  rules:
+    - name: verify-sbom-is-present-and-readable
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      verifyImages:
+        - imageReferences:
+            - "registry.example.com/*"
+          required: true
+          mutateDigest: false
+          verifyDigest: false
+          attestations:
+            # The CycloneDX predicate type as Kyverno's own sample library writes it.
+            # Confirm it against a real attestation before trusting it — the predicate
+            # type is an exact string match, and an attestation published under any other
+            # spelling is simply not found:
+            #
+            #   cosign download attestation <image> | jq -r '.payload|@base64d|fromjson|.predicateType'
+            - predicateType: https://cyclonedx.org/schema
+              attestors:
+                - count: 1
+                  entries:
+                    - keyless:
+                        subject: "https://github.com/<your-org>/*/.github/workflows/*"
+                        issuer: https://token.actions.githubusercontent.com
+                        rekor:
+                          url: https://rekor.sigstore.dev
+              conditions:
+                - all:
+                    # Is this the shape the rest of the conditions assume? An SPDX
+                    # document attested under this predicate type has no `bomFormat`, so
+                    # this is the condition that catches a mismatch the predicate type
+                    # alone cannot.
+                    - key: "{{ bomFormat || '' }}"
+                      operator: Equals
+                      value: CycloneDX
+                    # Is there anything in it? An empty array is falsy in JMESPath, so
+                    # `components || ''` yields an empty string when the list is absent
+                    # or empty, and `length` of that is zero. Without this, every
+                    # must-not-contain check below is satisfied by an SBOM listing
+                    # nothing.
+                    - key: "{{ length(components || '') }}"
+                      operator: GreaterThan
+                      value: 0
+
+    - name: reject-known-bad-dependency-versions
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-node-lease
+                - kube-public
+                - kyverno
+      verifyImages:
+        - imageReferences:
+            - "registry.example.com/*"
+          required: true
+          mutateDigest: false
+          verifyDigest: false
+          attestations:
+            - predicateType: https://cyclonedx.org/schema
+              attestors:
+                - count: 1
+                  entries:
+                    - keyless:
+                        subject: "https://github.com/<your-org>/*/.github/workflows/*"
+                        issuer: https://token.actions.githubusercontent.com
+                        rekor:
+                          url: https://rekor.sigstore.dev
+              conditions:
+                - all:
+                    # A worked example rather than a vulnerability feed. Admission control
+                    # is the wrong place to keep a CVE list current — it would need
+                    # editing faster than a policy repository can review changes, and a
+                    # list that is behind reports clean. Use this shape for the handful of
+                    # dependencies an organisation has decided must never run again, and
+                    # leave the moving target to the scanner and the policy beside this
+                    # one.
+                    #
+                    # The `|| 'none'` fallback is what keeps an image with no such
+                    # component from erroring: the filter returns an empty list, which is
+                    # falsy, so the comparison is made against a value that is in no
+                    # forbidden set. The companion rule above is what makes that mean
+                    # "not affected" rather than "nothing was read".
+                    - key: "{{ components[?name=='log4j-core'].version || 'none' }}"
+                      operator: AllNotIn
+                      value:
+                        - "2.0"
+                        - "2.1"
+                        - "2.2"
+                        - "2.3"
+                        - "2.4"
+                        - "2.5"
+                        - "2.6"
+                        - "2.7"
+                        - "2.8"
+                        - "2.9"
+                        - "2.10"
+                        - "2.11"
+                        - "2.12"
+                        - "2.13"
+                        - "2.14"
