@@ -77,10 +77,6 @@ metadata:
       opt-in label. Acts on no namespace until one is labelled, because a generate rule
       has no audit mode and a default-deny applied to a running namespace is an outage.
 spec:
-  # Also act on namespaces that already exist, not only ones created from now on. Without
-  # this, the policy protects nothing that was there before it and reports no gap.
-  generateExisting: true
-
   rules:
     - name: add-deny-all
       match:
@@ -98,6 +94,12 @@ spec:
         kind: NetworkPolicy
         name: default-deny-all
         namespace: "{{ request.object.metadata.name }}"
+        # Also act on namespaces that already exist, not only ones created from now on.
+        # Without this the policy protects nothing that was there before it, and reports
+        # no gap, because no rule was ever triggered for those namespaces. The setting
+        # belongs here rather than on `spec`: the policy-level field of the same name is
+        # deprecated in favour of this one.
+        generateExisting: true
         # Put it back if it is edited or deleted. Without this, a namespace silently
         # loses its baseline the moment somebody removes the resource, and the only
         # evidence is an absence.
@@ -141,6 +143,7 @@ spec:
         kind: NetworkPolicy
         name: allow-dns-egress
         namespace: "{{ request.object.metadata.name }}"
+        generateExisting: true
         synchronize: true
         orphanDownstreamOnPolicyDelete: true
         data:

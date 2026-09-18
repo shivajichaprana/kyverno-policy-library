@@ -121,10 +121,15 @@ is a match condition that starts empty: `policies/generate/` acts only on namesp
 carrying an opt-in label, so as shipped it acts on nothing and is turned on one namespace
 at a time.
 
-Image verification rules are the exception, and deliberately so: Kyverno documents no
-per-rule `failureAction` for `verifyImages`, so those policies still carry the
-policy-level `validationFailureAction`. That field is deprecated, its documented
-replacement covers `validate` rules only, and every file that uses it says so.
+Image verification rules set their mode the same way, on `verifyImages[*]` rather than on
+`validate`. Nothing in this library uses the policy-level `validationFailureAction`, which
+is deprecated, and a test asserts that no file reintroduces it.
+
+There is one control that `Audit` makes unavailable rather than merely unenforced.
+`verifyImages[*].mutateDigest` rewrites a verified tag to the digest it resolved to, and
+Kyverno refuses the combination: with an `Audit` failure action the policy is rejected on
+admission and by `kyverno apply`. So the rewrite is not a separate decision to take later
+— it is part of moving an image-verification rule to `Enforce`.
 
 ## Attestation rules
 

@@ -72,7 +72,8 @@ Each policy here is written around a specific instance of that:
   ephemeral container, so requiring it there would be a rule that can never pass. A
   `podSecurity` subrule names no list because it does not iterate one: it hands the Pod to
   the same library Pod Security Admission uses, which already reads all three.
-- **Audit by default**, set per rule via `validate.failureAction`, so the enforcement mode
+- **Audit by default**, set per rule via `validate.failureAction` or
+  `verifyImages[*].failureAction`, so the enforcement mode
   of a rule is readable beside the rule rather than at the top of the file.
 - **Placeholders only.** Registry hostnames, organisation names and keys are
   `registry.example.com`, `<your-org>` and `REPLACE_WITH_...`. Nothing here is a real
@@ -82,9 +83,10 @@ Each policy here is written around a specific instance of that:
 
 ## Requirements
 
-- **Kyverno 1.13 or newer.** The library uses the per-rule `validate.failureAction` and
-  the `webhookConfiguration` block, both of which replaced policy-level settings that were
-  deprecated in 1.13.
+- **Kyverno 1.13 or newer.** The library uses the per-rule `validate.failureAction`,
+  `verifyImages[*].failureAction` and the `webhookConfiguration` block, all of which
+  replaced policy-level settings that were deprecated in 1.13. Tested against the CLI
+  version pinned in the pipeline.
 - Kubernetes 1.25 or newer, matching Kyverno's own support matrix.
 - The [Kyverno CLI](https://kyverno.io/docs/kyverno-cli/) for testing policies before they
   reach a cluster.
@@ -134,8 +136,11 @@ The rest mean what they say as shipped. The tag policy is registry-agnostic; the
 Security Standards are the same everywhere; and a resource request or a disruption budget
 means the same thing in every cluster.
 
-Turn a rule on by changing that rule's `validate.failureAction` from `Audit` to
-`Enforce`. Read the policy report first — the report is the rehearsal.
+Turn a rule on by changing that rule's `failureAction` from `Audit` to `Enforce`. Read
+the policy report first — the report is the rehearsal. One control needs the same change
+to become available at all rather than merely enforced: `verifyImages[*].mutateDigest`
+rewrites a verified tag to its digest, and Kyverno refuses that combination while the
+failure action is `Audit`.
 
 ## Repository layout
 

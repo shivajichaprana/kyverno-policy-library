@@ -19,11 +19,14 @@
 #   image is still admitted and nothing reports otherwise. Shorten
 #   `imageVerifyCacheTTLDuration` on the admission controller if that window matters.
 #
-#   Enforcement mode is the deprecated field, deliberately. Kyverno documents no per-rule
-#   `failureAction` for `verifyImages`; the replacement introduced in 1.13 covers
-#   `validate` rules only. So this policy carries the policy-level
-#   `validationFailureAction` while the rest of the library uses the per-rule field. When
-#   a per-rule equivalent exists for image verification, this is the file that changes.
+#   Audit mode and the digest rewrite are mutually exclusive, and Kyverno enforces that
+#   rather than leaving it to be discovered. `verifyImages[*].mutateDigest` may only be
+#   true when the effective failure action is `Enforce`; with `Audit` the policy is
+#   rejected outright — "mutateDigest must be set to false for 'Audit' failure action" —
+#   by both the admission webhook and `kyverno apply`. Since the whole library ships
+#   Audit, and `Audit` is also the default when no action is set at all, this policy ships
+#   with the rewrite off. Turning it on is part of moving to `Enforce`, not a separate
+#   choice, and the GitOps consequence recorded beside it belongs with that step.
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -40,9 +43,6 @@ metadata:
       not matched by this rule and are not verified — that is the registry policy's job,
       not this one's.
 spec:
-  # Deprecated as of 1.13 and kept on purpose — see the header. `Audit` records the
-  # result in a PolicyReport and admits the request.
-  validationFailureAction: Audit
 
   # Background scanning re-evaluates existing Pods on a timer. Image verification is
   # excluded from that here: a background scan runs without the admission request, so it
@@ -78,22 +78,31 @@ spec:
                 - kube-public
                 - kyverno
       verifyImages:
-        - imageReferences:
+        # Set per rule, the same way every validating rule in this library sets its own
+        # mode. `Audit` records the result in a PolicyReport and admits the request.
+        - failureAction: Audit
+          imageReferences:
             - "registry.example.com/*"
           # Every matching image must be verified. With this false, an image that no
           # attestor could vouch for is admitted, and the rule reports success.
           required: true
-          # Replace the verified tag with the digest it resolved to. This is what closes
+          # Replacing the verified tag with the digest it resolved to is what would close
           # the gap between the moment the signature was checked and the moment the
-          # kubelet pulls, during which a tag can be repointed at unsigned content.
+          # kubelet pulls, during which a tag can be repointed at unsigned content. It is
+          # off here because Kyverno does not permit it in `Audit` mode — see the header —
+          # and it is the single change to make when this rule moves to `Enforce`.
           #
-          # It also means the running Pod's image field is not the string that was
-          # applied. A GitOps controller comparing `app:1.4.0` in git against
-          # `app@sha256:...` in the cluster will report drift it can never reconcile, so
-          # configure it to ignore the image field on these workloads.
-          mutateDigest: true
-          # Refuse an image that still has no digest after the mutation above.
-          verifyDigest: true
+          # Do it together with the consequence: the running Pod's image field then stops
+          # being the string that was applied, and a GitOps controller comparing
+          # `app:1.4.0` in git against `app@sha256:...` in the cluster reports drift it
+          # can never reconcile. Configure it to ignore the image field on these workloads
+          # in the same change, not afterwards.
+          mutateDigest: false
+          # Requiring a digest is a separate control from verifying a signature, and with
+          # the rewrite off it would be asking the author to write digests by hand. Left
+          # off so that this rule reports on signatures only: a released tag that the
+          # companion tag policy accepts must not appear here as a signing finding.
+          verifyDigest: false
           attestors:
             # `count` is how many entries must verify. Omitting it requires all of them,
             # which is the right setting for a key rotation where both the old and the new

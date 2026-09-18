@@ -47,7 +47,7 @@
 #   trust does not take effect until that entry expires.
 #   Background scanning is off, because a background scan carries no pull secrets.
 #   Enforcement uses the deprecated policy-level field, because Kyverno documents no
-#   per-rule `failureAction` for `verifyImages`.
+#   per-rule `failureAction`, which `verifyImages` does have.
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -64,9 +64,6 @@ metadata:
       than accepting that a correctly signed document exists. Images outside that
       registry are not matched and are not checked.
 spec:
-  # Deprecated as of 1.13 and kept deliberately: the per-rule replacement covers
-  # `validate` rules only, and this is a `verifyImages` rule.
-  validationFailureAction: Audit
 
   # A background scan runs without the admission request and therefore without the Pod's
   # pull secrets, so it reaches a private registry unauthenticated. The findings that
@@ -100,7 +97,10 @@ spec:
                 - kube-public
                 - kyverno
       verifyImages:
-        - imageReferences:
+        # Set per rule, the same way every validating rule in this library sets its own
+        # mode. `Audit` records the result in a PolicyReport and admits the request.
+        - failureAction: Audit
+          imageReferences:
             - "registry.example.com/*"
           # Set explicitly rather than left to the default. A default that changes between
           # releases is a control that can disappear without a commit to explain it.
