@@ -23,6 +23,7 @@ a green pipeline reports the same thing either way.
 | `resources/` | `require-resource-requests-and-limits`, `require-safe-disruption-budgets`, `require-topology-spread-constraints` |
 | `network/` | `require-network-identity-labels` |
 | `generate/` | `add-default-network-policies` |
+| `compliant/` | Every validating policy at once — no `kyverno-test.yaml`, see below |
 
 `resources/` mirrors the policy set of the same name. It holds the tests for
 `policies/resources/`, not the resource fixtures — every directory here has its fixtures
@@ -46,6 +47,16 @@ that combination and a fixture the API server would not admit tests nothing.
 
 **Every fixture is named by an expectation.** An unreferenced fixture is one somebody
 believes is covered.
+
+## One workload that must pass everything
+
+`compliant/resource.yaml` has no test manifest, because it is not asserting anything about
+one rule. The directories above check each rule in both directions and cannot see whether
+the rules are collectively satisfiable: a set of individually reasonable policies can
+leave nothing admissible — a registry rule and a signing rule naming different hosts, a
+spread rule contradicting a placement rule. The pipeline applies every validating policy
+to that manifest with audit findings treated as failures, so anything reported there is a
+false positive in the library rather than a problem with the workload.
 
 ## What is deliberately not tested here, and why
 
@@ -82,6 +93,9 @@ Kyverno generated is a separate question from whether generation happens at all.
 ```sh
 kyverno test tests/ --require-tests
 python3 tests/lint_test_manifests.py
+kyverno apply policies/images/restrict-image-registries.yaml \
+  policies/images/disallow-mutable-image-tags.yaml policies/pod-security/ \
+  policies/resources/ policies/network/ --resource tests/compliant/resource.yaml
 ```
 
 `--require-tests` matters: without it, a run that finds no tests at all exits zero. That

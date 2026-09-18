@@ -146,10 +146,11 @@ failure action is `Audit`.
 
 ```sh
 kyverno test tests/ --require-tests
-kyverno apply policies/images/ policies/pod-security/ policies/resources/ \
-  policies/network/ --resource tests/pod-security/resource.yaml
+kyverno apply policies/images/restrict-image-registries.yaml \
+  policies/images/disallow-mutable-image-tags.yaml policies/pod-security/ \
+  policies/resources/ policies/network/ --resource tests/compliant/resource.yaml
 python3 tests/lint_test_manifests.py
-yamllint -c .yamllint policies/ tests/
+yamllint -c .yamllint policies/ tests/ .github/workflows/
 ```
 
 The CLI test run is the only check here that knows what Kyverno actually does. The
@@ -180,6 +181,8 @@ a reason. See [`tests/README.md`](tests/README.md).
 | `tests/` | Kyverno CLI test cases: pass and fail fixtures per policy set |
 | `tests/README.md` | What the two test layers each check, and what is deliberately not tested |
 | `tests/lint_test_manifests.py` | Coverage and integrity gate over the test suite itself |
+| `tests/compliant/` | One workload that must satisfy every validating rule at once |
+| `.github/workflows/ci.yml` | Lint, test-suite gate, CLI test run, and the policy report |
 | `.yamllint` | Lint configuration shared by the local checks |
 | `LICENSE` | MIT |
 

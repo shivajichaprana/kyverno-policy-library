@@ -1,0 +1,153 @@
+---
+name: policy-ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned deliberately. Two of this library's constructs are version-dependent —
+  # the per-rule failureAction fields and the generate-level generateExisting — and
+  # a floating version would move the definition of a passing run.
+  KYVERNO_VERSION: v1.19.1
+
+jobs:
+  yaml-lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+      - name: Install yamllint
+        run: pip install yamllint==1.35.1
+      - name: Lint
+        run: yamllint -c .yamllint policies/ tests/ .github/workflows/
+
+  test-suite-gate:
+    # Checks the test suite rather than the policies. `kyverno test` verifies the
+    # expectations that were written down and reports nothing at all about a rule
+    # nobody wrote one for, so a suite can lose coverage without any run turning red.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install PyYAML==6.0.2 flake8==7.1.1
+      - name: Lint the gate
+        run: |
+          flake8 --select=E9,F63,F7,F82 --show-source tests/
+          flake8 --max-line-length=100 tests/
+          git ls-files '*.py' | xargs -r -n1 python -m py_compile
+      - name: Check coverage and integrity of the test suite
+        run: python tests/lint_test_manifests.py
+
+  policy-test:
+    # The only check here that knows what Kyverno actually does.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install Kyverno CLI
+        # A composite action running bash, so it carries no Node runtime of its own.
+        # Its `verify` input is left off: it fetches a detached .sig and .pem beside
+        # the release archive, and this release publishes neither, so enabling it
+        # would verify two 404 responses.
+        uses: kyverno/action-install-cli@fcee92fca5c883169ef9927acf543e0b5fc58289 # v0.2.0
+        with:
+          release: ${{ env.KYVERNO_VERSION }}
+      - name: Confirm the pinned version is what ran
+        run: kyverno version
+      - name: Run the test cases
+        # --require-tests matters: without it a run that discovers no tests exits
+        # zero, which is the same shape as a rule that matches nothing.
+        #
+        # --warnings-as-errors is deliberately absent. This library targets
+        # ClusterPolicy, which current Kyverno marks deprecated in favour of the CEL
+        # policy types, for reasons recorded in the README. Treating that warning as
+        # an error would turn a documented decision into a broken pipeline.
+        run: kyverno test tests/ --require-tests --detailed-results
+
+  admissible-workload:
+    # Every validating policy applied to one compliant workload, with audit findings
+    # treated as failures. The per-set cases check each rule in isolation; this asks
+    # whether the rules are collectively satisfiable, which no single case can see.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install Kyverno CLI
+        uses: kyverno/action-install-cli@fcee92fca5c883169ef9927acf543e0b5fc58289 # v0.2.0
+        with:
+          release: ${{ env.KYVERNO_VERSION }}
+      - name: Apply every validating policy to a compliant workload
+        # The signing policy is named out rather than the directory being passed,
+        # because a verifyImages rule reaches a verdict by contacting a registry and
+        # there is none here. The supply-chain set is excluded for the same reason.
+        run: |
+          kyverno apply \
+            policies/images/restrict-image-registries.yaml \
+            policies/images/disallow-mutable-image-tags.yaml \
+            policies/pod-security/ \
+            policies/resources/ \
+            policies/network/ \
+            --resource tests/compliant/resource.yaml
+
+  policy-report:
+    # An observation rather than a gate: the fixtures include deliberately
+    # non-compliant workloads, so findings are expected. --audit-warn reports an
+    # Audit rule's failure as a warning, and --warn-exit-code is passed explicitly
+    # so that intent survives a change to its default.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install Kyverno CLI
+        uses: kyverno/action-install-cli@fcee92fca5c883169ef9927acf543e0b5fc58289 # v0.2.0
+        with:
+          release: ${{ env.KYVERNO_VERSION }}
+      - name: Build a policy report over every fixture
+        run: |
+          kyverno apply \
+            policies/images/restrict-image-registries.yaml \
+            policies/images/disallow-mutable-image-tags.yaml \
+            policies/pod-security/ \
+            policies/resources/ \
+            policies/network/ \
+            --resource tests/images/resource.yaml \
+            --resource tests/images-autogen/resource.yaml \
+            --resource tests/pod-security/resource.yaml \
+            --resource tests/resources/resource.yaml \
+            --resource tests/network/resource.yaml \
+            --resource tests/compliant/resource.yaml \
+            --policy-report \
+            --output-format yaml \
+            --audit-warn \
+            --warn-exit-code 0 \
+            | tee policy-report.yaml
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: policy-report
+          path: policy-report.yaml
+          retention-days: 14
+
+  ci-complete:
+    runs-on: ubuntu-24.04
+    needs:
+      - yaml-lint
+      - test-suite-gate
+      - policy-test
+      - admissible-workload
+      - policy-report
+    steps:
+      - name: All checks passed
+        run: echo "policy-ci complete"
