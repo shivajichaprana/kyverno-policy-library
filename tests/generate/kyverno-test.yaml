@@ -1,0 +1,32 @@
+---
+# The generate set is the one that cannot be audited. A generate rule has no audit mode
+# and no enforce mode: it creates the resource or it does not, and there is no setting
+# that makes it describe what it would have created. So this is the only place the set's
+# behaviour is visible without applying it to a cluster.
+#
+# Only the positive direction is asserted. A Namespace without the opt-in label is not
+# matched at all, and what the CLI reports for a match that never happened is a different
+# question from what this set does — see tests/README.md.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: generate
+policies:
+  - ../../policies/generate/add-default-network-policies.yaml
+resources:
+  - resource.yaml
+results:
+  - policy: add-default-network-policies
+    rule: add-deny-all
+    kind: Namespace
+    resources:
+      - tenant-alpha
+    generatedResource: generated-deny-all.yaml
+    result: pass
+  - policy: add-default-network-policies
+    rule: add-dns-egress
+    kind: Namespace
+    resources:
+      - tenant-alpha
+    generatedResource: generated-dns-egress.yaml
+    result: pass

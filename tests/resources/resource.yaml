@@ -1,0 +1,247 @@
+---
+# Complete: CPU and memory requests, a memory limit, and a spread constraint that both
+# selects its own pods and is a hard requirement. Carries no spread label, so the
+# opt-in rule is skipped rather than evaluated.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: resources-complete
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: api
+spec:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: api
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          memory: 256Mi
+
+---
+# No requests at all. The Pod is BestEffort: the scheduler places it as though it needs
+# nothing and the kubelet evicts it first.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: resources-missing-requests
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: api
+spec:
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+      resources:
+        limits:
+          memory: 256Mi
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: resources-missing-memory-limit
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: api
+spec:
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+
+---
+# The requests rule covers initContainers as well, and this fixture isolates that: the
+# init container declares a memory limit but no requests, so exactly one of the two rules
+# changes verdict.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: init-missing-requests
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: api
+spec:
+  initContainers:
+    - name: migrate
+      image: registry.example.com/team/migrate:1.4.2
+      resources:
+        limits:
+          memory: 128Mi
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          memory: 256Mi
+
+---
+# A constraint with no labelSelector. It counts no pods, so the skew is computed over an
+# empty set and any placement satisfies it — the field is present, the workload reads as
+# spread, and no scheduling decision is affected.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spread-without-selector
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: api
+spec:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          memory: 256Mi
+
+---
+# A preference rather than a requirement. The scheduler discards it when it cannot be
+# met, so this workload can declare spreading and still place every replica on one node —
+# and the failure only shows up during the node loss the constraint was written for.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spread-schedule-anyway
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: api
+spec:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: api
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          memory: 256Mi
+
+---
+# Labelled as needing spread and declaring none.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spread-required-and-absent
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: api
+    resilience.example.com/spread: required
+spec:
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          memory: 256Mi
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: spread-required-and-present
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: api
+    resilience.example.com/spread: required
+spec:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: api
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          memory: 256Mi
+
+---
+# A budget that permits one eviction and says which pods it covers.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-safe
+  namespace: apps
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+
+---
+# Pinned at zero allowed disruptions. A node drain waits for a disruption the cluster has
+# been told never to permit, and nothing reports an error anywhere.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-blocking-max-unavailable
+  namespace: apps
+spec:
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+
+---
+# The same outcome written the other way round.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-blocking-min-available
+  namespace: apps
+spec:
+  minAvailable: 100%
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api
+
+---
+# An empty selector. On policy/v1 this governs every pod in the namespace; on the removed
+# policy/v1beta1 it governed none. The same manifest, unchanged and still valid, reversed
+# meaning across the upgrade that stopped serving the older version.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-empty-selector
+  namespace: apps
+spec:
+  maxUnavailable: 1
+  selector: {}

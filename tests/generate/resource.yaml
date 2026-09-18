@@ -1,0 +1,11 @@
+---
+# A generate rule acts on the trigger it matched, and this one matches a Namespace
+# carrying the opt-in label. That label is the whole of the set's safety: without it the
+# rule matches nothing, which is how a default-deny policy can be installed in a running
+# cluster without severing anything.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-alpha
+  labels:
+    network-baseline.example.com/enabled: "true"

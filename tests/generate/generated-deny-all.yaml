@@ -1,0 +1,21 @@
+---
+# What the rule must produce. Both directions are named: a NetworkPolicy affects exactly
+# the directions listed in policyTypes, so a resource called `default-deny` that names
+# one of them leaves the other unrestricted while reading as a default deny.
+#
+# `app.kubernetes.io/managed-by: kyverno` is normalised onto both sides of the comparison
+# by the CLI, and the `generate.kyverno.io/*` labels Kyverno adds are stripped from both,
+# so this file declares only the labels the rule itself sets.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: tenant-alpha
+  labels:
+    app.kubernetes.io/managed-by: kyverno
+    network-baseline.example.com/generated: "true"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

@@ -1,0 +1,95 @@
+---
+# Every rule of both image policies, in both directions. A rule that is only ever
+# expected to pass would report exactly the same result if it matched nothing at all,
+# which is the failure mode this library is written around — so each rule below has at
+# least one passing and one failing expectation.
+#
+# `require-image-signatures.yaml` is not tested here. It is a verifyImages rule: reaching
+# a verdict means contacting a registry and checking a signature against a public key, so
+# a meaningful test needs a signed image published somewhere the test can read. See
+# tests/README.md.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: images
+policies:
+  - ../../policies/images/restrict-image-registries.yaml
+  - ../../policies/images/disallow-mutable-image-tags.yaml
+resources:
+  - resource.yaml
+results:
+  # --- restrict-image-registries ------------------------------------------------
+  - policy: restrict-image-registries
+    rule: validate-registries
+    kind: Pod
+    resources:
+      - pinned-approved-registry
+      - digest-pinned
+      - untagged-image
+      - latest-tag
+      - ephemeral-latest-tag
+      - init-container-untagged
+    result: pass
+  - policy: restrict-image-registries
+    rule: validate-registries
+    kind: Pod
+    resources:
+      - unapproved-registry
+      - implicit-docker-hub
+    result: fail
+  - policy: restrict-image-registries
+    rule: restrict-repository-paths
+    kind: Pod
+    resources:
+      - pinned-approved-registry
+      - digest-pinned
+      - untagged-image
+      - latest-tag
+      - ephemeral-latest-tag
+      - init-container-untagged
+    result: pass
+  - policy: restrict-image-registries
+    rule: restrict-repository-paths
+    kind: Pod
+    resources:
+      - unapproved-registry
+      - implicit-docker-hub
+    result: fail
+
+  # --- disallow-mutable-image-tags ----------------------------------------------
+  - policy: disallow-mutable-image-tags
+    rule: require-image-tag
+    kind: Pod
+    resources:
+      - pinned-approved-registry
+      - digest-pinned
+      - unapproved-registry
+      - implicit-docker-hub
+      - latest-tag
+      - ephemeral-latest-tag
+    result: pass
+  - policy: disallow-mutable-image-tags
+    rule: require-image-tag
+    kind: Pod
+    resources:
+      - untagged-image
+      - init-container-untagged
+    result: fail
+  - policy: disallow-mutable-image-tags
+    rule: disallow-latest-tag
+    kind: Pod
+    resources:
+      - pinned-approved-registry
+      - digest-pinned
+      - unapproved-registry
+      - implicit-docker-hub
+      - untagged-image
+      - init-container-untagged
+    result: pass
+  - policy: disallow-mutable-image-tags
+    rule: disallow-latest-tag
+    kind: Pod
+    resources:
+      - latest-tag
+      - ephemeral-latest-tag
+    result: fail

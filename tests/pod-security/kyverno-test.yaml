@@ -1,0 +1,62 @@
+---
+# The two Pod Security Standards profiles and the one control neither of them contains.
+#
+# `baseline-compliant-only` is the case worth reading twice: it passes the baseline rule
+# and fails the restricted one, which is what makes shipping them as two rules a decision
+# rather than duplication. A Pod that violates baseline is reported by both, and that
+# double reporting is stated in the policy rather than hidden.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: pod-security
+policies:
+  - ../../policies/pod-security/require-pod-security-standards.yaml
+  - ../../policies/pod-security/require-read-only-root-filesystem.yaml
+resources:
+  - resource.yaml
+results:
+  - policy: require-pod-security-standards
+    rule: validate-baseline-profile
+    kind: Pod
+    resources:
+      - restricted-compliant
+      - baseline-compliant-only
+      - writable-root-filesystem
+      - ephemeral-writable-root
+    result: pass
+  - policy: require-pod-security-standards
+    rule: validate-baseline-profile
+    kind: Pod
+    resources:
+      - privileged-container
+    result: fail
+  - policy: require-pod-security-standards
+    rule: validate-restricted-profile
+    kind: Pod
+    resources:
+      - restricted-compliant
+      - writable-root-filesystem
+      - ephemeral-writable-root
+    result: pass
+  - policy: require-pod-security-standards
+    rule: validate-restricted-profile
+    kind: Pod
+    resources:
+      - privileged-container
+      - baseline-compliant-only
+    result: fail
+  - policy: require-read-only-root-filesystem
+    rule: validate-read-only-root-filesystem
+    kind: Pod
+    resources:
+      - restricted-compliant
+      - privileged-container
+      - baseline-compliant-only
+    result: pass
+  - policy: require-read-only-root-filesystem
+    rule: validate-read-only-root-filesystem
+    kind: Pod
+    resources:
+      - writable-root-filesystem
+      - ephemeral-writable-root
+    result: fail

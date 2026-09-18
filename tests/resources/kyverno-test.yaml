@@ -1,0 +1,144 @@
+---
+# Three policies over two kinds. The disruption-budget rules match
+# `PodDisruptionBudget`, which carries no pod template and so has nothing for
+# auto-generation to translate — which is why the convention that protects coverage in
+# this library is the narrow one: no rule names `Pod` alongside another kind.
+#
+# One `skip` expectation is included deliberately. `require-spread-for-labelled-workloads`
+# is gated on a label, and a rule whose precondition never holds and a rule that always
+# passes produce the same clean report. The skip is the only expectation that shows the
+# gate is doing something.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: resources
+policies:
+  - ../../policies/resources/require-resource-requests-and-limits.yaml
+  - ../../policies/resources/require-safe-disruption-budgets.yaml
+  - ../../policies/resources/require-topology-spread-constraints.yaml
+resources:
+  - resource.yaml
+results:
+  # --- require-resource-requests-and-limits --------------------------------------
+  - policy: require-resource-requests-and-limits
+    rule: require-resource-requests
+    kind: Pod
+    resources:
+      - resources-complete
+      - resources-missing-memory-limit
+      - spread-without-selector
+      - spread-schedule-anyway
+      - spread-required-and-absent
+      - spread-required-and-present
+    result: pass
+  - policy: require-resource-requests-and-limits
+    rule: require-resource-requests
+    kind: Pod
+    resources:
+      - resources-missing-requests
+      - init-missing-requests
+    result: fail
+  - policy: require-resource-requests-and-limits
+    rule: require-memory-limits
+    kind: Pod
+    resources:
+      - resources-complete
+      - resources-missing-requests
+      - init-missing-requests
+      - spread-without-selector
+      - spread-schedule-anyway
+      - spread-required-and-absent
+      - spread-required-and-present
+    result: pass
+  - policy: require-resource-requests-and-limits
+    rule: require-memory-limits
+    kind: Pod
+    resources:
+      - resources-missing-memory-limit
+    result: fail
+
+  # --- require-topology-spread-constraints ---------------------------------------
+  - policy: require-topology-spread-constraints
+    rule: require-spread-label-selector
+    kind: Pod
+    resources:
+      - resources-complete
+      - resources-missing-requests
+      - resources-missing-memory-limit
+      - init-missing-requests
+      - spread-schedule-anyway
+      - spread-required-and-absent
+      - spread-required-and-present
+    result: pass
+  - policy: require-topology-spread-constraints
+    rule: require-spread-label-selector
+    kind: Pod
+    resources:
+      - spread-without-selector
+    result: fail
+  - policy: require-topology-spread-constraints
+    rule: require-enforced-spread
+    kind: Pod
+    resources:
+      - resources-complete
+      - resources-missing-requests
+      - resources-missing-memory-limit
+      - init-missing-requests
+      - spread-without-selector
+      - spread-required-and-absent
+      - spread-required-and-present
+    result: pass
+  - policy: require-topology-spread-constraints
+    rule: require-enforced-spread
+    kind: Pod
+    resources:
+      - spread-schedule-anyway
+    result: fail
+  - policy: require-topology-spread-constraints
+    rule: require-spread-for-labelled-workloads
+    kind: Pod
+    resources:
+      - spread-required-and-present
+    result: pass
+  - policy: require-topology-spread-constraints
+    rule: require-spread-for-labelled-workloads
+    kind: Pod
+    resources:
+      - spread-required-and-absent
+    result: fail
+  - policy: require-topology-spread-constraints
+    rule: require-spread-for-labelled-workloads
+    kind: Pod
+    resources:
+      - resources-complete
+    result: skip
+
+  # --- require-safe-disruption-budgets -------------------------------------------
+  - policy: require-safe-disruption-budgets
+    rule: disallow-blocking-budgets
+    kind: PodDisruptionBudget
+    resources:
+      - pdb-safe
+      - pdb-empty-selector
+    result: pass
+  - policy: require-safe-disruption-budgets
+    rule: disallow-blocking-budgets
+    kind: PodDisruptionBudget
+    resources:
+      - pdb-blocking-max-unavailable
+      - pdb-blocking-min-available
+    result: fail
+  - policy: require-safe-disruption-budgets
+    rule: require-explicit-budget-selector
+    kind: PodDisruptionBudget
+    resources:
+      - pdb-safe
+      - pdb-blocking-max-unavailable
+      - pdb-blocking-min-available
+    result: pass
+  - policy: require-safe-disruption-budgets
+    rule: require-explicit-budget-selector
+    kind: PodDisruptionBudget
+    resources:
+      - pdb-empty-selector
+    result: fail

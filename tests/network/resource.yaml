@@ -1,0 +1,58 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: labels-complete
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: api
+    network.example.com/tier: frontend
+spec:
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: labels-complete-backend
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: worker
+    network.example.com/tier: backend
+spec:
+  containers:
+    - name: worker
+      image: registry.example.com/team/worker:1.4.2
+
+---
+# No labels at all. In a namespace with a default-deny policy this Pod loses connectivity
+# and somebody fixes it within the hour; in a namespace without one it is unrestricted,
+# and the cluster looks exactly as it does when everything is correct.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: labels-absent
+  namespace: apps
+spec:
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+
+---
+# A typo is a perfectly valid label. The presence check passes, and the value is selected
+# by no NetworkPolicy written for any known tier — which is why the value is constrained
+# by a second rule rather than left to the first.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tier-typo
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: api
+    network.example.com/tier: frontned
+spec:
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2

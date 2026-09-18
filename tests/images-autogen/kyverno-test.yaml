@@ -1,0 +1,32 @@
+---
+# Only the tag policy is loaded here. The registry rule reads a context variable built
+# from the Pod's image list, and whether that resolves the same way under an
+# auto-generated rule is a separate question from the one this case is asking.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: images-autogen
+policies:
+  - ../../policies/images/disallow-mutable-image-tags.yaml
+resources:
+  - resource.yaml
+results:
+  - policy: disallow-mutable-image-tags
+    rule: require-image-tag
+    kind: Deployment
+    resources:
+      - api-pinned
+      - api-latest
+    result: pass
+  - policy: disallow-mutable-image-tags
+    rule: disallow-latest-tag
+    kind: Deployment
+    resources:
+      - api-pinned
+    result: pass
+  - policy: disallow-mutable-image-tags
+    rule: disallow-latest-tag
+    kind: Deployment
+    resources:
+      - api-latest
+    result: fail

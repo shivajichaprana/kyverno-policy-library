@@ -142,6 +142,23 @@ to become available at all rather than merely enforced: `verifyImages[*].mutateD
 rewrites a verified tag to its digest, and Kyverno refuses that combination while the
 failure action is `Audit`.
 
+## Validation
+
+```sh
+kyverno test tests/ --require-tests
+kyverno apply policies/images/ policies/pod-security/ policies/resources/ \
+  policies/network/ --resource tests/pod-security/resource.yaml
+python3 tests/lint_test_manifests.py
+yamllint -c .yamllint policies/ tests/
+```
+
+The CLI test run is the only check here that knows what Kyverno actually does. The
+Python gate checks the suite rather than the policies: `kyverno test` verifies the
+expectations that were written down and reports nothing about a rule nobody wrote one
+for, so the gate requires every rule to be expected to pass somewhere and to fail
+somewhere, and requires every policy file to be either covered or named as uncovered with
+a reason. See [`tests/README.md`](tests/README.md).
+
 ## Repository layout
 
 | Path | Contents |
@@ -160,6 +177,9 @@ failure action is `Audit`.
 | `policies/supply-chain/README.md` | What a signature proves, the check that verifies nothing, and why predicate types are exact strings |
 | `policies/generate/` | The namespace network baseline Kyverno creates, and the RBAC it needs to create it |
 | `policies/generate/README.md` | Why this set has no audit mode, and four ways it creates nothing while looking correct |
+| `tests/` | Kyverno CLI test cases: pass and fail fixtures per policy set |
+| `tests/README.md` | What the two test layers each check, and what is deliberately not tested |
+| `tests/lint_test_manifests.py` | Coverage and integrity gate over the test suite itself |
 | `.yamllint` | Lint configuration shared by the local checks |
 | `LICENSE` | MIT |
 

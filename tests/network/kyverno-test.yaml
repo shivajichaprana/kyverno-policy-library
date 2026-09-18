@@ -1,0 +1,47 @@
+---
+# The value rule is gated on the label being present, so a Pod carrying no labels is
+# skipped by it rather than failed twice. That skip is the expectation that distinguishes
+# "the tier is absent" from "the tier is wrong", which are different findings with
+# different fixes.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: network
+policies:
+  - ../../policies/network/require-network-identity-labels.yaml
+resources:
+  - resource.yaml
+results:
+  - policy: require-network-identity-labels
+    rule: require-identity-labels
+    kind: Pod
+    resources:
+      - labels-complete
+      - labels-complete-backend
+      - tier-typo
+    result: pass
+  - policy: require-network-identity-labels
+    rule: require-identity-labels
+    kind: Pod
+    resources:
+      - labels-absent
+    result: fail
+  - policy: require-network-identity-labels
+    rule: require-known-network-tier
+    kind: Pod
+    resources:
+      - labels-complete
+      - labels-complete-backend
+    result: pass
+  - policy: require-network-identity-labels
+    rule: require-known-network-tier
+    kind: Pod
+    resources:
+      - tier-typo
+    result: fail
+  - policy: require-network-identity-labels
+    rule: require-known-network-tier
+    kind: Pod
+    resources:
+      - labels-absent
+    result: skip

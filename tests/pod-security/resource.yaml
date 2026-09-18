@@ -1,0 +1,114 @@
+---
+# Restricted-compliant, and the reference every other fixture here is a single deviation
+# from. All four restricted controls are set at CONTAINER level, which is the form that
+# resolves the same way whatever the Pod-level context says.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: restricted-compliant
+  namespace: apps
+spec:
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+        capabilities:
+          drop:
+            - ALL
+        readOnlyRootFilesystem: true
+
+---
+# A baseline violation, which is also a restricted violation because restricted includes
+# baseline. `allowPrivilegeEscalation` is deliberately left unset rather than set false:
+# the API rejects that combination with `privileged: true`, and a fixture describing a Pod
+# the API server would refuse tests nothing.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: privileged-container
+  namespace: apps
+spec:
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+      securityContext:
+        privileged: true
+        readOnlyRootFilesystem: true
+
+---
+# Clears baseline and fails restricted. This is the pair that justifies shipping the two
+# profiles as separate rules: a cluster can be clean on one and not the other, and the
+# usual adoption path takes baseline to Enforce first.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: baseline-compliant-only
+  namespace: apps
+spec:
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+      securityContext:
+        readOnlyRootFilesystem: true
+
+---
+# The control that neither profile contains. This Pod satisfies restricted in full and
+# still leaves its image layer writable, which is why that check is a policy of its own
+# rather than something the profiles were expected to cover.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: writable-root-filesystem
+  namespace: apps
+spec:
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+        capabilities:
+          drop:
+            - ALL
+        readOnlyRootFilesystem: false
+
+---
+# The same control reached through the list a `containers`-only rule never reads. The
+# ephemeral container is otherwise restricted-compliant, so the only expectation that
+# changes is the read-only one.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ephemeral-writable-root
+  namespace: apps
+spec:
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+        capabilities:
+          drop:
+            - ALL
+        readOnlyRootFilesystem: true
+  ephemeralContainers:
+    - name: debug
+      image: registry.example.com/tools/debug:1.0.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+        capabilities:
+          drop:
+            - ALL
+        readOnlyRootFilesystem: false

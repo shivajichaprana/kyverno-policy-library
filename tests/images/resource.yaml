@@ -1,0 +1,119 @@
+---
+# Fixtures for the image policies. Every Pod here lives in a namespace the policies do
+# not exclude, so a result means the rule ran and reached a verdict.
+#
+# The approved registry and repository path are the placeholders the policies ship with.
+# The `ghcr.io/<your-org>/*` alternative is deliberately not exercised: it contains a
+# placeholder that is not a legal image reference, so a fixture using it would be testing
+# the wildcard rather than the policy.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pinned-approved-registry
+  namespace: apps
+spec:
+  initContainers:
+    - name: migrate
+      image: registry.example.com/team/migrate:1.4.2
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+
+---
+# A digest is the strongest pinning available, and both tag rules are written to accept
+# it: the reference contains a colon, so the tag-presence pattern matches, and it carries
+# no tag, so the `latest` check cannot fail.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: digest-pinned
+  namespace: apps
+spec:
+  containers:
+    - name: api
+      image: registry.example.com/team/api@sha256:5b0e1a4c0f0b46c0ea6a9f2c9f9f37b3f1b6f8f4a0c5d5c2b1a09876543210ff
+
+---
+# An explicit, unapproved registry. Fails on the registry and on the repository path, and
+# passes both tag rules — the reference is pinned, it is just pinned to the wrong place.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: unapproved-registry
+  namespace: apps
+spec:
+  containers:
+    - name: api
+      image: docker.io/library/nginx:1.27.3
+
+---
+# The case the registry rule exists for. `nginx:1.27.3` names no registry at all, and
+# Kubernetes pulls it from Docker Hub. A rule reading the raw `image` field sees a string
+# that does not contain `docker.io` and reports nothing; the rule under test reads the
+# registry Kyverno resolved, which is `docker.io`, and fails.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: implicit-docker-hub
+  namespace: apps
+spec:
+  containers:
+    - name: api
+      image: nginx:1.27.3
+
+---
+# No tag, which resolves to `latest` at pull time. This fixture is the reason the tag
+# policy needs two rules: it fails the tag-presence rule and PASSES the `latest` rule,
+# because the string it would have to match on is never written down.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: untagged-image
+  namespace: apps
+spec:
+  containers:
+    - name: api
+      image: registry.example.com/team/api
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: latest-tag
+  namespace: apps
+spec:
+  containers:
+    - name: api
+      image: registry.example.com/team/api:latest
+
+---
+# `kubectl debug` injects an ephemeral container into a running Pod with that Pod's
+# service account, and it never passes through `containers`. This fixture is pinned
+# everywhere except there.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ephemeral-latest-tag
+  namespace: apps
+spec:
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2
+  ephemeralContainers:
+    - name: debug
+      image: registry.example.com/tools/debug:latest
+
+---
+# The same coverage question for the other optional list.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: init-container-untagged
+  namespace: apps
+spec:
+  initContainers:
+    - name: migrate
+      image: registry.example.com/team/migrate
+  containers:
+    - name: api
+      image: registry.example.com/team/api:1.4.2

@@ -1,0 +1,33 @@
+---
+# The exception without which the deny above is unusable: a deny-all egress rule blocks
+# name resolution, and the symptom is applications failing to reach things by name, which
+# reads as an application fault.
+#
+# The namespace and pod selectors are ONE list item, so they mean AND. Split into two
+# items they would allow every pod in kube-system and every pod labelled k8s-app=kube-dns
+# in any namespace — both parse, one hyphen apart.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: tenant-alpha
+  labels:
+    app.kubernetes.io/managed-by: kyverno
+    network-baseline.example.com/generated: "true"
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
