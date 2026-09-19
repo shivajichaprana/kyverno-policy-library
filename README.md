@@ -12,6 +12,44 @@ A generate policy has no audit mode — it creates the resource or it does not �
 `policies/generate/` expresses the same default a different way: it matches only
 namespaces carrying an opt-in label, and so acts on nothing until one is labelled.
 
+## Architecture at a glance
+
+```mermaid
+flowchart TB
+    subgraph authoring["Authoring and release"]
+        sets["policies/ — 6 sets, 13 ClusterPolicy documents"]
+        tests["tests/ — CLI expectations, both directions per rule"]
+        gate["tests/lint_test_manifests.py — coverage and integrity"]
+        ci["policy-ci — lint, gate, kyverno test, one admissible workload, report"]
+        sets --> tests --> gate --> ci
+        sets --> ci
+    end
+
+    subgraph cluster["In a cluster"]
+        api["API server"]
+        webhook["Kyverno admission webhook"]
+        bg["Kyverno background controller"]
+        report["PolicyReport — what would have been blocked"]
+        netpol["Generated NetworkPolicies"]
+        api --> webhook
+        webhook -->|"Audit: record, admit"| report
+        webhook -->|"Enforce: reject"| api
+        bg --> report
+        bg -->|"labelled namespaces only"| netpol
+    end
+
+    ci -->|"kubectl apply"| webhook
+    ci -.->|"same policies, same engine"| bg
+```
+
+Two paths reach a verdict and they do not see the same things. The **webhook** evaluates a
+request as it arrives, which is the only place an image signature can be checked, because
+verification needs the pull credentials that came with the request. The **background
+controller** re-evaluates resources already in the cluster, which is the only place an
+existing workload is ever assessed at all. Four policies here run on the first path only,
+and that is why an image-verification finding appears when a workload is redeployed rather
+than when the policy is applied.
+
 ## What this library covers
 
 | Set | Question it answers | Status |
@@ -115,8 +153,12 @@ kubectl get policyreport -A
 Check a manifest before it reaches a cluster:
 
 ```sh
-kyverno apply policies/images/ --resource my-workload.yaml
+make apply RESOURCE=my-workload.yaml
 ```
+
+`make help` lists every target. The full path from "applied" to "enforced" is in
+[`docs/adoption-guide.md`](docs/adoption-guide.md), and what any individual finding means
+is in [`docs/policy-catalog.md`](docs/policy-catalog.md).
 
 Some policies need editing before their reports mean anything, because a registry, an
 organisation, a signing identity or a label key in them stands in for one of yours:
@@ -145,20 +187,28 @@ failure action is `Audit`.
 ## Validation
 
 ```sh
-kyverno test tests/ --require-tests
-kyverno apply policies/images/restrict-image-registries.yaml \
-  policies/images/disallow-mutable-image-tags.yaml policies/pod-security/ \
-  policies/resources/ policies/network/ --resource tests/compliant/resource.yaml
-python3 tests/lint_test_manifests.py
-yamllint -c .yamllint policies/ tests/ .github/workflows/
+make ci
 ```
 
-The CLI test run is the only check here that knows what Kyverno actually does. The
-Python gate checks the suite rather than the policies: `kyverno test` verifies the
-expectations that were written down and reports nothing about a rule nobody wrote one
-for, so the gate requires every rule to be expected to pass somewhere and to fail
-somewhere, and requires every policy file to be either covered or named as uncovered with
-a reason. See [`tests/README.md`](tests/README.md).
+That chains the same four checks the pipeline runs, with the same flags, in the same
+order:
+
+| Target | What it proves |
+|---|---|
+| `make lint` | Everything parses (`yamllint`, and `flake8` over the gate itself). |
+| `make gate` | The test suite still covers what it claims to. |
+| `make test` | What Kyverno actually does with each rule, on the pinned CLI version. |
+| `make admissible` | That the validating rules are collectively satisfiable. |
+
+The CLI test run is the only check here that knows what Kyverno actually does. The Python
+gate checks the suite rather than the policies: `kyverno test` verifies the expectations
+that were written down and reports nothing about a rule nobody wrote one for, so the gate
+requires every rule to be expected to pass somewhere and to fail somewhere, and requires
+every policy file to be either covered or named as uncovered with a reason. See
+[`tests/README.md`](tests/README.md).
+
+`make report` renders the policy report over every fixture, which is the same artifact the
+pipeline uploads.
 
 ## Repository layout
 
@@ -182,9 +232,24 @@ a reason. See [`tests/README.md`](tests/README.md).
 | `tests/README.md` | What the two test layers each check, and what is deliberately not tested |
 | `tests/lint_test_manifests.py` | Coverage and integrity gate over the test suite itself |
 | `tests/compliant/` | One workload that must satisfy every validating rule at once |
-| `.github/workflows/ci.yml` | Lint, test-suite gate, CLI test run, and the policy report |
+| `docs/policy-catalog.md` | Every rule in one table, keyed on what a report prints |
+| `docs/adoption-guide.md` | The path from applied to enforced, and the order it has to happen in |
+| `Makefile` | The local entry points, with the pipeline's flags |
+| `.github/workflows/ci.yml` | Lint, test-suite gate, CLI test run, one admissible workload, and the policy report |
 | `.yamllint` | Lint configuration shared by the local checks |
 | `LICENSE` | MIT |
+
+## Documentation
+
+| Document | Read it when |
+|---|---|
+| [`docs/policy-catalog.md`](docs/policy-catalog.md) | A report named a policy and a rule and you want to know what that rule rejects, whether it is substituted yet, and whether it is tested |
+| [`docs/adoption-guide.md`](docs/adoption-guide.md) | Moving from Audit to Enforce, writing an exception, or arming the generate set |
+| [`policies/README.md`](policies/README.md) | Writing or reviewing a policy for this library |
+| [`tests/README.md`](tests/README.md) | Adding a test, or working out what the two test layers each cover |
+
+Each policy set has its own README with the reasoning behind its rules, linked from the
+layout table above.
 
 ## Design principles
 
